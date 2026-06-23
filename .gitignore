@@ -216,3 +216,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# hangar-evals
+results/        # eval run outputs (jsonl traces, score tables) — regenerated, never committed
+.DS_Store
