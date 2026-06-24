@@ -309,19 +309,38 @@ Budget ~10–12 GB for macOS + harness → plan for **~32–36 GB weights+KV**. 
 spot: **24–32B dense @ 4-bit** or a **30B-A3B MoE**. **Tool-calling reliability
 is the gate.**
 
-- **Smoke:** Qwen3-8B (~5 GB) — the T0 floor model (pulled). ✅
-- **Tier-1:** Qwen3-Coder-30B (A3B MoE, ~18 GB) — primary result-bearing model.
-- **Stretch:** Qwen3-Coder-Next (80B-A3B, ~46 GB-class; ~70.6% SWE-bench
-  Verified on a 46 GB machine) — upper bound of the local arm. Confirm exact
-  ollama tag/quant before pulling.
-- **Cross-family:** Devstral-Small-24B (tuned for OpenHands), Gemma 4, a
-  local-feasible GLM — breadth guard against tuning to one family.
+- **Smoke:** Qwen3-8B (~5 GB) — the T0 floor model (pulled). ✅ Note: **not**
+  MLX-accelerated (see below) — it runs on the llama.cpp Metal path. Fine as the
+  floor; just slower than the MLX picks.
+- **Tier-1 (MLX, primary):** a **Qwen3.5 / Qwen3.6 coder** tag — these ARE
+  MLX-accelerated on Ollama (Qwen3.5-35B-A3B class fits at 4-bit). Qwen3.6 is the
+  newer pick with stronger agentic coding. This **replaces** the earlier
+  Qwen3-Coder-30B pick for the result-bearing model: Qwen3-Coder-30B GGUF runs
+  but falls back to llama.cpp Metal, NOT MLX.
+- **Cross-family (MLX):** **Gemma 4** — also MLX-accelerated; breadth guard
+  against tuning to one family.
+- **Stretch:** an 80B-A3B-class tag (e.g. Qwen3-Coder-Next) — upper bound of the
+  local arm; confirm exact ollama tag/quant + that it fits 48 GB before pulling.
+- **Non-MLX breadth (llama.cpp Metal):** Devstral-Small-24B, a local-feasible
+  GLM — usable but unaccelerated; keep secondary.
   (GLM-5.1=754B / Kimi / DeepSeek / MiniMax frontier MoEs are too big for 48 GB.)
 - **Anchor:** frontier hosted Claude via the existing Agent-SDK driver.
 
+### MLX-acceleration reality (verified 2026-06-24, via direct search + claude.ai)
+Ollama's MLX backend (0.19+, Mar 2026; ~2× tok/s, needs **32 GB+** unified mem —
+48 GB ✓) accelerates **only specific architectures: Qwen3.5, Qwen3.6, Gemma 4**.
+Everything else (Qwen3, Qwen3-Coder, Llama 4, Mistral, Phi) silently falls back
+to **llama.cpp Metal**. So for an MLX-accelerated primary, pick a Qwen3.5/3.6
+tag, not the older Qwen3-Coder-30B. Sources: ollama.com/blog/mlx,
+ollama.com/library/{qwen3.5,qwen3.6,qwen3-coder}, gingter.org/2026/04/23.
+
+**Native-MLX serving (the later serving variable):** the stock
+`mlx_lm.server` OpenAI tool-call support is a **stub** (enabling PR unmerged) —
+do NOT wire the harness to it for tool calling. Use **`mlx-openai-server`**,
+which has per-model `--tool-call-parser` flags (`qwen3_coder`, `qwen3_next`, …).
+
 ⚠️ Knowledge cutoff Jan 2026; it's now mid-2026. Trust the *families*; confirm
-exact current tags before pulling. Serve via MLX for best Apple-Silicon
-throughput; Ollama easier and now has workable tool-calling.
+exact current tags before pulling.
 
 **Refresh-the-picks search prompt:**
 > "As of mid-2026, list the best open-weight LLMs for *agentic coding with
@@ -338,7 +357,9 @@ throughput; Ollama easier and now has workable tool-calling.
 - [ ] **Dev venv:** own venv for hangar-evals (with the-hangar installed in) vs
       sharing the-hangar's `.venv` (current). Both work with the seam.
 - [ ] Serving runtime of record: Ollama (now) → native MLX (later) as a serving
-      variable in the matrix.
+      variable in the matrix. **Resolved facts (§9):** Ollama MLX accelerates only
+      Qwen3.5/3.6/Gemma 4; native-MLX tool calling needs `mlx-openai-server`, not
+      `mlx_lm.server`. Open part: which exact tags + when to add the MLX arm.
 - [ ] OpenCode `--format json` event schema — where do tool-call/text parts
       appear? Needed for programmatic scoring (Step 5). Until resolved, score
       tool-use from the omd provenance DB.
