@@ -97,6 +97,20 @@ def parse_opencode_events(stdout: str, server: str) -> OpenCodeRun:
     return OpenCodeRun("\n".join(text_parts), calls, cost, turns)
 
 
+# OpenCode's built-in tools. We disable ALL of them so the local agent is
+# restricted to the omd MCP tools only — matching the Claude driver's
+# disallowed_tools, so both harnesses face the same MCP-only surface. Without
+# this, OpenCode hands the model `write`/`bash`/etc. and an unrestricted local
+# agent has more capability than the anchor (verified: qwen3:8b used `write`
+# 12x on the paraboloid task). Disabling via `tools` removes them from the
+# offered set (confirmed by spike) rather than merely denying at call time.
+# Version-fragile: a NEW built-in OpenCode adds would leak until listed here.
+BUILTIN_TOOLS = [
+    "bash", "edit", "write", "read", "glob", "grep", "list",
+    "patch", "webfetch", "websearch", "task", "todowrite", "todoread",
+]
+
+
 def render_opencode_config(
     mcp: MCPServerSpec,
     model: str,
@@ -109,7 +123,8 @@ def render_opencode_config(
     ``@ai-sdk/openai-compatible``; ``tools: true`` flags the model as
     function-calling capable. The mcp block translates the harness-neutral
     ``MCPServerSpec`` into OpenCode's schema (``type: "local"``, a single
-    ``command`` list, and ``environment``).
+    ``command`` list, and ``environment``). ``tools`` disables OpenCode's
+    built-ins so only the omd MCP tools remain (the MCP-only track).
     """
     return {
         "$schema": _CONFIG_SCHEMA,
@@ -121,6 +136,7 @@ def render_opencode_config(
                 "models": {model: {"tools": True}},
             },
         },
+        "tools": {t: False for t in BUILTIN_TOOLS},
         "mcp": {
             mcp.name: {
                 "type": "local",
@@ -167,6 +183,10 @@ class OpenCodeDriver:
             stdin=subprocess.DEVNULL,
         )
         wall = time.monotonic() - start
+
+        # Persist the raw event stream so every run is debuggable after the
+        # fact (OpenCode itself does not retain `run`-mode transcripts).
+        (data_root / "opencode_events.jsonl").write_text(proc.stdout)
 
         if proc.returncode != 0:
             raise RuntimeError(

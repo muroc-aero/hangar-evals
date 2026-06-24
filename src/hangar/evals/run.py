@@ -64,7 +64,8 @@ def run_cell(
     score = score_report(case.metrics, report, refs) if report is not None else None
 
     # Tool-use (harness trace) + workflow adherence (provenance DB).
-    tool_metrics = parse_tool_trace(result.tool_call_trace or [])
+    trace = result.tool_call_trace or []
+    tool_metrics = parse_tool_trace(trace)
     db = data_root / "analysis.db"
     prov = read_provenance(db) if db.exists() else None
 
@@ -77,6 +78,10 @@ def run_cell(
         "passed": (score.passed if score else False),
         "scores": _scores_to_dicts(score),
         "tool_use": _tool_metrics_to_dict(tool_metrics),
+        # Per-call trace, so the record shows WHICH tools ran, not just counts.
+        "tool_trace": [
+            {"tool": c.tool, "ok": c.ok, "error_code": c.error_code} for c in trace
+        ],
         "provenance": _prov_to_dict(prov),
         "telemetry": {
             "wall_clock_s": result.wall_clock_s,

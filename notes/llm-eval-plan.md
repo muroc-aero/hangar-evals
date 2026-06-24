@@ -246,7 +246,9 @@ point at the **same omd MCP stdio server**; model serving stays constant via one
 ```
 AgentDriver (abstract)
   ├── ClaudeAgentSDKDriver   # exists today → frontier ANCHOR / ceiling
-  ├── OpenCodeDriver         # OpenAI-compat endpoint + MCP config (tools: omd_<tool>)
+  ├── OpenCodeDriver         # OpenAI-compat endpoint + MCP config (tools: omd_<tool>);
+  │                          #   built-ins (write/bash/…) DISABLED via `tools` -> MCP-only,
+  │                          #   matching the anchor's disallowed_tools (Step 7)
   └── OpenHandsDriver        # OpenAI-compat endpoint + ~/.openhands/mcp.json
 ```
 
@@ -375,7 +377,9 @@ exact current tags before pulling.
       container-based; OpenCode is not.
 - [ ] Quantization policy: pin one quant per model (Q4_K_M / MLX-4bit) for fair
       comparison; record in `models.yaml`.
-- [ ] Seeds/temperature per cell (default 3–5 @ low temp).
+- [ ] Seeds/temperature per cell (default 3–5 @ low temp). **Evidence it's
+      essential:** two identical paraboloid × opencode/qwen3:8b runs gave 1 turn /
+      0 tool calls vs 13 turns / 46 tool calls — a single run is meaningless.
 
 ---
 

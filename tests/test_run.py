@@ -58,6 +58,11 @@ def test_run_cell_correct_report_passes(tmp_path):
     assert {s["verdict"] for s in rec["scores"]} == {"PASS"}
     assert rec["tool_use"]["total_calls"] == 2
     assert rec["tool_use"]["valid_call_rate"] == 1.0
+    # Per-call trace is recorded (which tools ran, not just counts).
+    assert rec["tool_trace"] == [
+        {"tool": "start_session", "ok": True, "error_code": None},
+        {"tool": "run_plan", "ok": True, "error_code": None},
+    ]
     assert rec["telemetry"]["num_turns"] == 3
     # No omd run happened (fake driver), so no provenance DB.
     assert rec["provenance"] is None
