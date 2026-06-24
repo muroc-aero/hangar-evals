@@ -3,14 +3,17 @@ name = "hangar-evals"
 version = "0.1.0"
 description = "Offline benchmark: local LLMs x agentic coding harnesses vs Hangar MCP/CLI tools"
 requires-python = ">=3.11"
-# No runtime deps yet. They are added by the step that first uses them:
-#   - claude-agent-sdk   (step 3, Claude anchor driver)
+# No required runtime deps. Optional arms add their own (see below):
+#   - claude-agent-sdk   (step 3, Claude anchor driver -> [anchor] extra)
 #   - opencode/ollama    (step 4, local-model driver)
-# This keeps the skeleton trivially installable and reviewable.
+# Keeping the base trivially installable lets each arm stay opt-in.
 dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# Anchor arm: the frontier Claude driver. Optional so the base package and the
+# local-model arms stay installable without it. Also requires the Claude Code CLI.
+anchor = ["claude-agent-sdk"]
 
 [build-system]
 requires = ["hatchling"]
