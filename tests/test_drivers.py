@@ -70,9 +70,30 @@ def _fake_sdk() -> tuple[types.ModuleType, dict]:
             self.result = result
             self.total_cost_usd = total_cost_usd
 
+    class ToolUseBlock:
+        def __init__(self, id, name, input=None):
+            self.id, self.name, self.input = id, name, input or {}
+
+    class ToolResultBlock:
+        def __init__(self, tool_use_id, content, is_error=False):
+            self.tool_use_id, self.content, self.is_error = tool_use_id, content, is_error
+
+    class UserMessage:
+        def __init__(self, content):
+            self.content = content
+
     async def query(prompt, options):
         captured["prompt"] = prompt
         captured["options"] = options
+        # ok call -> good result; bad call -> omd error envelope (schema error).
+        yield AssistantMessage([
+            ToolUseBlock("t1", "mcp__omd__start_session"),
+            ToolUseBlock("t2", "mcp__omd__run_plan"),
+        ])
+        yield UserMessage([
+            ToolResultBlock("t1", '{"session_id": "s1"}'),
+            ToolResultBlock("t2", '{"error": {"code": "USER_INPUT_ERROR"}}', is_error=True),
+        ])
         yield AssistantMessage([TextBlock("...working...")])
         yield ResultMessage(result="FINAL REPORT", total_cost_usd=0.0123)
 
@@ -80,6 +101,9 @@ def _fake_sdk() -> tuple[types.ModuleType, dict]:
     mod.TextBlock = TextBlock
     mod.AssistantMessage = AssistantMessage
     mod.ResultMessage = ResultMessage
+    mod.ToolUseBlock = ToolUseBlock
+    mod.ToolResultBlock = ToolResultBlock
+    mod.UserMessage = UserMessage
     mod.query = query
     return mod, captured
 
@@ -114,6 +138,20 @@ def test_driver_parses_stream_and_wires_options(monkeypatch, tmp_path):
         "args": ["-m", "hangar.omd.server"],
         "env": spec.env,
     }
+
+
+def test_driver_captures_tool_call_trace(monkeypatch, tmp_path):
+    mod, _ = _fake_sdk()
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
+
+    result = ClaudeAgentSDKDriver().run(
+        "do the task", MCPServerSpec.omd(tmp_path), tmp_path, cwd=tmp_path,
+    )
+
+    trace = result.tool_call_trace
+    assert [c.tool for c in trace] == ["start_session", "run_plan"]  # prefix stripped
+    assert trace[0].ok is True and trace[0].error_code is None
+    assert trace[1].ok is False and trace[1].error_code == "USER_INPUT_ERROR"
 
 
 def test_driver_without_sdk_raises_clear_error(monkeypatch, tmp_path):
