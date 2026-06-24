@@ -360,11 +360,17 @@ exact current tags before pulling.
       variable in the matrix. **Resolved facts (§9):** Ollama MLX accelerates only
       Qwen3.5/3.6/Gemma 4; native-MLX tool calling needs `mlx-openai-server`, not
       `mlx_lm.server`. Open part: which exact tags + when to add the MLX arm.
-- [ ] OpenCode `--format json` event schema — where do tool-call/text parts
-      appear? Needed for programmatic scoring (Step 5). Until resolved, score
-      tool-use from the omd provenance DB.
-- [ ] How do OpenHands/OpenCode expose a per-run tool-call trace? If thin, lean
-      harder on the omd provenance DB.
+- [x] OpenCode `--format json` event schema — **RESOLVED** (live spike,
+      2026-06-24). JSONL, one event/line: `step_start`, `tool_use`
+      (`part.tool`, `part.state.status`, `part.state.output`=omd result/error
+      envelope), `text` (`part.text` = the report), `step_finish` (tokens,
+      cost). One json run yields BOTH the report and the tool trace — the
+      earlier "only step_start/step_finish" finding was an early-exit artifact.
+      Also found: `opencode run` BLOCKS on open stdin headless — must close it.
+- [x] OpenCode per-run tool-call trace — **RESOLVED**: `tool_use` events give a
+      clean trace. omd schema errors arrive as tool OUTPUT (status stays
+      "completed"), so classify on the error envelope, not the status.
+      (OpenHands trace exposure still TBD when that arm lands.)
 - [ ] CLI-track sandboxing (Bash allowed) — container per run? OpenHands is
       container-based; OpenCode is not.
 - [ ] Quantization policy: pin one quant per model (Q4_K_M / MLX-4bit) for fair
