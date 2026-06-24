@@ -34,8 +34,13 @@ class MCPServerSpec:
         Mirrors ``eval_lane_c.py``: ``<python> -m hangar.omd.server`` with the
         four ``OMD_*`` paths the server reads. ``data_root`` is created by the
         caller (one temp root per run).
+
+        Paths are made absolute: the MCP server subprocess inherits the
+        harness's cwd (OpenCode runs it under ``--dir``), so a relative
+        ``OMD_DB_PATH`` would resolve under that cwd and nest — the DB would
+        land somewhere the scorer never looks.
         """
-        data_root = Path(data_root)
+        data_root = Path(data_root).resolve()
         return cls(
             name="omd",
             command=sys.executable,

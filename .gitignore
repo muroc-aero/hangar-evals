@@ -218,5 +218,7 @@ __marimo__/
 .streamlit/secrets.toml
 
 # hangar-evals
-results/        # eval run outputs (jsonl traces, score tables) — regenerated, never committed
+# eval run outputs (jsonl traces, score tables) — regenerated, never committed.
+# (gitignore has no inline comments — the pattern must be on its own line.)
+results/
 .DS_Store
