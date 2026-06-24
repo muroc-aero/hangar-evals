@@ -69,6 +69,15 @@ def test_render_config_provider_and_mcp(tmp_path):
     assert omd["environment"]["OMD_DB_PATH"] == str(tmp_path / "analysis.db")
 
 
+def test_render_config_disables_builtin_tools(tmp_path):
+    # MCP-only restriction: every built-in is disabled so only omd_* remain,
+    # matching the Claude driver's disallowed_tools.
+    cfg = render_opencode_config(MCPServerSpec.omd(tmp_path), "qwen3:8b")
+    assert cfg["tools"]["write"] is False
+    assert cfg["tools"]["bash"] is False
+    assert all(v is False for v in cfg["tools"].values())
+
+
 def test_render_config_custom_provider_and_url(tmp_path):
     spec = MCPServerSpec.omd(tmp_path)
     cfg = render_opencode_config(
@@ -160,6 +169,9 @@ def test_run_writes_config_parses_events_and_closes_stdin(monkeypatch, tmp_path)
     assert result.num_turns == 1
     assert result.wall_clock_s is not None and result.wall_clock_s >= 0
 
+    # Raw events persisted for debuggability.
+    assert (tmp_path / "opencode_events.jsonl").read_text() == SPIKE_JSONL
+
 
 def test_run_nonzero_exit_raises(monkeypatch, tmp_path):
     def fake_run(argv, capture_output, text, cwd, stdin):
@@ -179,14 +191,21 @@ def test_run_nonzero_exit_raises(monkeypatch, tmp_path):
 def test_opencode_live_smoke(tmp_path):
     if shutil.which("opencode") is None:
         pytest.skip("opencode binary not on PATH")
-    prompt = "Using ONLY the omd MCP tools, call start_session once, then reply DONE."
+    # Tempt a built-in file write — the restriction should leave it unavailable,
+    # so the model can only act through omd_* tools.
+    prompt = (
+        "Create a file named notes.txt with the word hello using your "
+        "file-writing tool; if you cannot, call the omd start_session tool "
+        "instead. Then reply DONE."
+    )
     result = OpenCodeDriver().run(
         prompt, MCPServerSpec.omd(tmp_path), tmp_path, model=LIVE_MODEL,
     )
-    # The driver drove a real run and parsed structured output. We assert it
-    # captured SOMETHING — a tool trace and/or report text. Report-text
-    # reliability is model-dependent: the weak floor model sometimes emits no
-    # final text (e.g. after mis-firing a non-omd tool), which is itself a
-    # legitimate eval signal, not a driver failure.
+    # Driver captured structured output, and NO non-omd built-in was usable.
     assert result.tool_call_trace or result.final_text.strip(), "driver captured nothing"
     assert result.num_turns is not None
+    builtins_used = [c.tool for c in result.tool_call_trace
+                     if c.tool in {"write", "bash", "read", "edit"}]
+    assert not builtins_used, f"built-in tools leaked: {builtins_used}"
+    # Raw events were persisted for debugging.
+    assert (tmp_path / "opencode_events.jsonl").exists()
