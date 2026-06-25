@@ -9,9 +9,10 @@ A run leaves two trails, and they capture different failures:
     Consumed as a harness-neutral ``list[ToolCall]`` (each driver emits these).
 
   * The omd **provenance DB** (``analysis.db``) — what the server persisted:
-    domain entities (plans, decisions) and activities (validate/execute/assess,
-    each completed|failed). This is where workflow adherence and domain-level
-    success/recovery live.
+    domain entities (plans, decisions) and activities (decide/execute/replan/
+    assess, each completed|failed). This is where domain-level success/recovery
+    lives. NOTE: ``validate_plan`` records NO activity here, so "validated
+    before executing" is read from the tool trace, not this DB.
 
 ``parse_tool_trace`` reads the first; ``read_provenance`` reads the second.
 Together they answer §7's tool-use / workflow / robustness questions.
@@ -29,6 +30,20 @@ from pathlib import Path
 # reaches omd, so the driver marks it with this synthetic code.
 SCHEMA_ERROR_CODE = "USER_INPUT_ERROR"
 HALLUCINATED_CODE = "TOOL_NOT_FOUND"
+
+# omd tools that EXECUTE a plan vs VALIDATE it. "Validated before executing" (a
+# §7 workflow/robustness signal) is computed from the harness trace, NOT the
+# provenance DB: validate_plan records no activity row, so the DB literally
+# cannot answer it. The execute set is every tool that runs a plan.
+VALIDATE_TOOLS = frozenset({"validate_plan"})
+EXECUTE_TOOLS = frozenset({"run_plan", "run_polar", "run_study"})
+
+# The activity_type vocabulary omd ACTUALLY writes — verified against
+# packages/omd/src/hangar/omd/*.py (2026-06-25): decide, execute, replan,
+# assess. (db.py's docstring still lists a stale draft/revise/validate set; the
+# code never writes those.) read_provenance stays vocabulary-agnostic, but this
+# pins the ground truth so a future name-specific metric can't silently rot.
+OMD_ACTIVITY_TYPES = frozenset({"decide", "execute", "replan", "assess"})
 
 
 def parse_omd_error_code(content: str | None) -> str | None:
@@ -72,6 +87,10 @@ class ToolUseMetrics:
     hallucinated_calls: int
     recovered_errors: int          # failed calls later retried OK on the same tool
     failed_calls: int
+    # Workflow-adherence signal read from the trace (NOT the provenance DB):
+    # a validate_plan call precedes the first execute. None when nothing was
+    # executed (the order question doesn't arise).
+    validated_before_execute: bool | None
 
     @property
     def valid_call_rate(self) -> float:
@@ -95,6 +114,10 @@ def parse_tool_trace(calls: list[ToolCall]) -> ToolUseMetrics:
 
     Recovery = a failed call followed *later* in the trace by a successful call
     to the same tool (the agent read the error envelope and corrected itself).
+
+    ``validated_before_execute`` = a ``validate_plan`` call (attempt; pass or
+    fail) appears before the first execute tool. Read here, not from the
+    provenance DB, because ``validate_plan`` leaves no activity row there.
     """
     valid = sum(c.ok for c in calls)
     schema = sum(c.error_code == SCHEMA_ERROR_CODE for c in calls)
@@ -108,6 +131,14 @@ def parse_tool_trace(calls: list[ToolCall]) -> ToolUseMetrics:
         if any(later.ok and later.tool == c.tool for later in calls[i + 1:]):
             recovered += 1
 
+    exec_idx = next((i for i, c in enumerate(calls) if c.tool in EXECUTE_TOOLS), None)
+    if exec_idx is None:
+        validated_before_execute = None
+    else:
+        validated_before_execute = any(
+            c.tool in VALIDATE_TOOLS for c in calls[:exec_idx]
+        )
+
     return ToolUseMetrics(
         total_calls=len(calls),
         valid_calls=valid,
@@ -115,6 +146,7 @@ def parse_tool_trace(calls: list[ToolCall]) -> ToolUseMetrics:
         hallucinated_calls=hallucinated,
         recovered_errors=recovered,
         failed_calls=failed,
+        validated_before_execute=validated_before_execute,
     )
 
 
@@ -130,7 +162,6 @@ class ProvenanceMetrics:
     n_activities: int
     n_failed: int
     recovered_activities: int          # failed type X later completed as type X
-    validated_before_execute: bool | None  # None when no execute activity ran
     has_decision: bool                 # a 'decision' entity => log_decision used
 
     @property
@@ -175,16 +206,6 @@ def read_provenance(db_path: Path) -> ProvenanceMetrics:
             recovered += 1
             seen_failed = [t for t in seen_failed if t != a["activity_type"]]
 
-    # Validated before executing: first validate precedes first execute.
-    def first_idx(kind: str) -> int | None:
-        for i, t in enumerate(order):
-            if t == kind:
-                return i
-        return None
-
-    vi, ei = first_idx("validate"), first_idx("execute")
-    validated_before_execute = None if ei is None else (vi is not None and vi < ei)
-
     entity_types = [e["entity_type"] for e in ents]
     return ProvenanceMetrics(
         activity_order=order,
@@ -192,6 +213,5 @@ def read_provenance(db_path: Path) -> ProvenanceMetrics:
         n_activities=len(acts),
         n_failed=len(failed),
         recovered_activities=recovered,
-        validated_before_execute=validated_before_execute,
         has_decision="decision" in entity_types,
     )
