@@ -1,15 +1,31 @@
-"""Runner — one cell of the model × harness × task matrix, end to end.
+"""Runner — the model × harness × task matrix, multi-seed, end to end.
 
-A *cell* is (case, harness, model, seed). ``run_cell`` builds the prompt, drives
-the agent, then scores it three ways — numeric correctness (vs Lane A), tool-use
-(harness trace), and workflow adherence (provenance DB) — and returns one
-JSON-serializable record. The CLI runs a small matrix and appends records to a
-gitignored ``results/*.jsonl``.
+A *cell* is (case, harness, model); ``run_cell`` runs ONE seed of it — builds the
+prompt, drives the agent, scores it three ways (numeric vs Lane A, tool-use
+trace, provenance DB) — and returns one JSON record. Because a single local-model
+run is noise (Step 9), each cell is run N seeds and ``aggregate_cell`` reduces
+them to a pass-rate ``CellSummary``.
 
-    python -m hangar.evals.run --case paraboloid --harness opencode --seeds 1
-    python -m hangar.evals.run --case paraboloid --harness claude,opencode
+A whole run is described by a ``RunConfig``, which makes runs **scriptable and
+reproducible** two ways:
 
-Scoring is held constant; only the driver/model vary — that's the whole point.
+    # 1. a JSON config file (every run also writes one as a manifest):
+    python -m hangar.evals.run --config configs/paraboloid_q36.json
+
+    # 2. your own Python script:
+    from hangar.evals.run import RunConfig, run_matrix
+    run_matrix(RunConfig(case="paraboloid", harnesses=("opencode",),
+                         model="qwen3.6:35b-mlx", seeds=3), stamp="...")
+
+Or the plain CLI flags:
+
+    python -m hangar.evals.run --case paraboloid --harness opencode --seeds 3
+
+Each run writes three siblings in ``results/``: ``<case>_<stamp>.jsonl`` (per-seed
+records), ``<case>_<stamp>_config.json`` (the manifest — re-run via ``--config``),
+and ``<case>_<stamp>_summary.json`` (the per-cell summaries). The random seed is
+NOT yet reproducible, but the *matrix* is. Scoring is held constant; only the
+driver/model vary — that's the whole point.
 """
 
 from __future__ import annotations
@@ -18,9 +34,11 @@ import argparse
 import json
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from hangar.evals.aggregate import CellSummary, aggregate_cell
 from hangar.evals.cases import CASES, Case, build_prompt
 from hangar.evals.drivers.base import MCPServerSpec
 from hangar.evals.drivers.claude_sdk import ClaudeAgentSDKDriver
@@ -34,6 +52,44 @@ HARNESSES = {
     "claude": (ClaudeAgentSDKDriver, None),
     "opencode": (OpenCodeDriver, "qwen3:8b"),
 }
+
+_CONFIG_KEYS = ("case", "harnesses", "model", "seeds", "max_turns", "results_dir")
+
+
+@dataclass(frozen=True)
+class RunConfig:
+    """A full, serializable description of one eval run — the scriptable unit.
+
+    ``model`` overrides every harness's default when set. Round-trips to/from a
+    JSON config file so a run can be reproduced by ``--config <manifest>`` or
+    rebuilt in a Python script (modulo the not-yet-reproducible random seed).
+    """
+
+    case: str = "paraboloid"
+    harnesses: tuple[str, ...] = ("opencode",)
+    model: str | None = None
+    seeds: int = 3
+    max_turns: int = 80
+    results_dir: str = "results"
+
+    def to_dict(self) -> dict:
+        d = {k: getattr(self, k) for k in _CONFIG_KEYS}
+        d["harnesses"] = list(self.harnesses)  # tuple -> JSON array
+        return d
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RunConfig":
+        unknown = set(d) - set(_CONFIG_KEYS)
+        if unknown:
+            raise ValueError(f"RunConfig: unknown keys {sorted(unknown)}")
+        d = dict(d)
+        if "harnesses" in d:
+            d["harnesses"] = tuple(d["harnesses"])
+        return cls(**d)
+
+    @classmethod
+    def from_json_file(cls, path) -> "RunConfig":
+        return cls.from_dict(json.loads(Path(path).read_text()))
 
 
 def run_cell(
@@ -148,43 +204,107 @@ def _print_summary(record: dict) -> None:
         print(f"    {s['key']:<14s} ref={s['lane_a']:.6g} got={got} -> {s['verdict']}")
 
 
+def _print_cell_summary(s: CellSummary) -> None:
+    print(f"  ══ cell summary: {s.case} · {s.harness}/{s.model} ({s.n_seeds} seeds) ══")
+    print(f"     pass-rate {s.n_passed}/{s.n_seeds} ({s.pass_rate:.0%})  |  "
+          f"completed {s.n_completed}/{s.n_seeds} ({s.completion_rate:.0%})")
+    if s.per_metric_pass:
+        parts = ", ".join(f"{k} {v}/{s.n_seeds}" for k, v in s.per_metric_pass.items())
+        print(f"     per-metric PASS: {parts}")
+    if s.turns:
+        print(f"     turns  min/med/max: {s.turns.min:g} / {s.turns.median:g} / {s.turns.max:g}")
+    if s.wall_clock_s:
+        w = s.wall_clock_s
+        print(f"     wall_s min/med/max: {w.min:.1f} / {w.median:.1f} / {w.max:.1f}")
+    if s.valid_call_rate:
+        v = s.valid_call_rate
+        print(f"     valid% min/med/max: {v.min:.0%} / {v.median:.0%} / {v.max:.0%}")
+
+
+def run_matrix(config: RunConfig, stamp: str) -> list[CellSummary]:
+    """Run the full matrix in ``config``; write records + manifest + summaries.
+
+    One cell per (harness) — each run ``config.seeds`` times, then reduced to a
+    ``CellSummary``. ``stamp`` is injected by the caller so output naming is
+    deterministic and the function stays testable. Returns the cell summaries.
+    """
+    unknown = [h for h in config.harnesses if h not in HARNESSES]
+    if unknown:
+        raise ValueError(f"unknown harness(es): {unknown}. choose from {list(HARNESSES)}")
+    if config.case not in CASES:
+        raise ValueError(f"unknown case: {config.case}. choose from {list(CASES)}")
+
+    case = CASES[config.case]
+    results_dir = Path(config.results_dir).resolve()
+    (results_dir / "run_data").mkdir(parents=True, exist_ok=True)
+
+    base = f"{config.case}_{stamp}"
+    records_path = results_dir / f"{base}.jsonl"
+    manifest_path = results_dir / f"{base}_config.json"
+    summary_path = results_dir / f"{base}_summary.json"
+
+    # Manifest FIRST so the run is reproducible (via `--config <this file>`) even
+    # if it crashes partway. Records the exact matrix, modulo the random seed.
+    manifest_path.write_text(json.dumps(
+        {"stamp": stamp, "config": config.to_dict()}, indent=2))
+
+    summaries: list[CellSummary] = []
+    with records_path.open("w") as fh:
+        for harness in config.harnesses:
+            factory, default_model = HARNESSES[harness]
+            model = config.model or default_model
+            driver = factory()
+            cell_records: list[dict] = []
+            for seed in range(config.seeds):
+                record = run_cell(case, driver, harness, model, seed,
+                                  results_dir, config.max_turns)
+                fh.write(json.dumps(record) + "\n")
+                fh.flush()
+                cell_records.append(record)
+                _print_summary(record)
+                print()
+            summary = aggregate_cell(cell_records)
+            summaries.append(summary)
+            _print_cell_summary(summary)
+            print()
+
+    summary_path.write_text(json.dumps([s.to_dict() for s in summaries], indent=2))
+    print(f"Wrote {records_path}\n      {manifest_path}\n      {summary_path}")
+    return summaries
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--config", type=Path,
+                        help="JSON run config (a manifest); overrides the flags below")
     parser.add_argument("--case", default="paraboloid", choices=list(CASES))
     parser.add_argument("--harness", default="opencode",
                         help="comma-separated: " + ",".join(HARNESSES))
     parser.add_argument("--model", default=None, help="override the harness default model")
-    parser.add_argument("--seeds", type=int, default=1)
+    parser.add_argument("--seeds", type=int, default=3)
     parser.add_argument("--max-turns", type=int, default=80)
-    parser.add_argument("--results-dir", default="results", type=Path)
+    parser.add_argument("--results-dir", default="results")
     args = parser.parse_args(argv)
 
-    case = CASES[args.case]
-    harnesses = [h.strip() for h in args.harness.split(",") if h.strip()]
-    unknown = [h for h in harnesses if h not in HARNESSES]
+    if args.config:
+        config = RunConfig.from_json_file(args.config)
+    else:
+        harnesses = tuple(h.strip() for h in args.harness.split(",") if h.strip())
+        config = RunConfig(
+            case=args.case, harnesses=harnesses, model=args.model,
+            seeds=args.seeds, max_turns=args.max_turns,
+            results_dir=str(args.results_dir),
+        )
+
+    unknown = [h for h in config.harnesses if h not in HARNESSES]
     if unknown:
         parser.error(f"unknown harness(es): {unknown}. Choose from {list(HARNESSES)}")
+    if config.case not in CASES:
+        parser.error(f"unknown case: {config.case}. Choose from {list(CASES)}")
 
-    results_dir = args.results_dir.resolve()
-    (results_dir / "run_data").mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    out_path = results_dir / f"{args.case}_{stamp}.jsonl"
-
-    print(f"Running {args.case} × {harnesses} × {args.seeds} seed(s) -> {out_path}\n")
-    with out_path.open("w") as fh:
-        for harness in harnesses:
-            factory, default_model = HARNESSES[harness]
-            model = args.model or default_model
-            driver = factory()
-            for seed in range(args.seeds):
-                record = run_cell(case, driver, harness, model, seed,
-                                  results_dir, args.max_turns)
-                fh.write(json.dumps(record) + "\n")
-                fh.flush()
-                _print_summary(record)
-                print()
-
-    print(f"Wrote {out_path}")
+    print(f"Running {config.case} × {list(config.harnesses)} × {config.seeds} seed(s)\n")
+    run_matrix(config, stamp)
     return 0
 
 
