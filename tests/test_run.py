@@ -7,9 +7,14 @@ report + tool trace, so the result-record assembly is deterministic.
 
 from __future__ import annotations
 
+import json
+
+import pytest
+
+from hangar.evals import run as run_mod
 from hangar.evals.cases import CASES, build_prompt
 from hangar.evals.drivers.base import AgentResult
-from hangar.evals.run import run_cell
+from hangar.evals.run import RunConfig, run_cell, run_matrix
 from hangar.evals.scoring import compute_refs
 from hangar.evals.trace import ToolCall
 
@@ -100,3 +105,83 @@ def test_build_prompt_is_harness_neutral():
     assert "mcp__omd__" not in prompt   # no Claude-specific tool namespace
     assert "omd_start_session" not in prompt
     assert "ONLY the omd tools" in prompt
+
+
+# --- RunConfig: the scriptable/reproducible unit -------------------------------
+
+
+def test_run_config_round_trips_through_json():
+    cfg = RunConfig(case="paraboloid", harnesses=("opencode", "claude"),
+                    model="qwen3.6:35b-mlx", seeds=3, max_turns=40)
+    again = RunConfig.from_dict(json.loads(json.dumps(cfg.to_dict())))
+    assert again == cfg
+    assert isinstance(again.harnesses, tuple)   # JSON array -> tuple
+
+
+def test_run_config_from_json_file(tmp_path):
+    p = tmp_path / "cfg.json"
+    p.write_text(json.dumps({"case": "paraboloid", "harnesses": ["opencode"],
+                             "model": "qwen3.6:35b-mlx", "seeds": 5}))
+    cfg = RunConfig.from_json_file(p)
+    assert cfg.model == "qwen3.6:35b-mlx" and cfg.seeds == 5
+    assert cfg.harnesses == ("opencode",)
+
+
+def test_run_config_rejects_unknown_keys():
+    with pytest.raises(ValueError, match="unknown keys"):
+        RunConfig.from_dict({"case": "paraboloid", "temperature": 0.7})
+
+
+# --- run_matrix: multi-seed wiring + manifest (run_cell faked) ------------------
+
+
+def _fake_record(seed, *, passed):
+    """A complete per-seed record (every field _print_summary/aggregate read)."""
+    return {
+        "case": "paraboloid", "harness": "fake", "model": "m0", "seed": seed,
+        "completed": True, "passed": passed,
+        "scores": [{"key": "analysis_f_xy", "lane_a": 39.0,
+                    "agent": 39.0 if passed else 22.0, "rel_err": 0.0,
+                    "verdict": "PASS" if passed else "FAIL"}],
+        "tool_use": {"total_calls": 5, "valid_call_rate": 0.9, "schema_errors": 0,
+                     "hallucinated_calls": 0, "recovered_errors": 0},
+        "telemetry": {"num_turns": 10 + seed, "wall_clock_s": 100.0 + seed,
+                      "cost_usd": 0.0},
+    }
+
+
+def test_run_matrix_writes_records_manifest_and_summary(monkeypatch, tmp_path):
+    # seed 1 fails, seeds 0 and 2 pass -> 2/3 pass-rate, no driver/the-hangar.
+    def fake_run_cell(case, driver, harness, model, seed, results_dir, max_turns):
+        return _fake_record(seed, passed=(seed != 1))
+
+    monkeypatch.setattr(run_mod, "run_cell", fake_run_cell)
+    monkeypatch.setitem(run_mod.HARNESSES, "fake", (lambda: object(), "m0"))
+
+    cfg = RunConfig(case="paraboloid", harnesses=("fake",), seeds=3,
+                    results_dir=str(tmp_path))
+    summaries = run_matrix(cfg, stamp="20260625T000000Z")
+
+    assert len(summaries) == 1
+    s = summaries[0]
+    assert s.n_passed == 2 and s.n_seeds == 3 and s.completion_rate == 1.0
+
+    base = tmp_path / "paraboloid_20260625T000000Z"
+    # Per-seed records: one JSON line per seed.
+    lines = base.with_suffix(".jsonl").read_text().strip().splitlines()
+    assert len(lines) == 3
+    # Manifest reproduces the run via --config.
+    manifest = json.loads((tmp_path / "paraboloid_20260625T000000Z_config.json").read_text())
+    assert manifest["config"] == cfg.to_dict()
+    assert RunConfig.from_dict(manifest["config"]) == cfg
+    # Summary persisted as JSON-shaped CellSummary list.
+    summ = json.loads((tmp_path / "paraboloid_20260625T000000Z_summary.json").read_text())
+    assert summ[0]["pass_rate"] == pytest.approx(2 / 3)
+    assert summ[0]["per_metric_pass"] == {"analysis_f_xy": 2}
+
+
+def test_run_matrix_rejects_unknown_harness(tmp_path):
+    cfg = RunConfig(case="paraboloid", harnesses=("nope",), seeds=1,
+                    results_dir=str(tmp_path))
+    with pytest.raises(ValueError, match="unknown harness"):
+        run_matrix(cfg, stamp="20260625T000000Z")

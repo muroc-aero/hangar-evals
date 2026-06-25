@@ -66,8 +66,8 @@ beyond are the post-ladder refinements.
 | # | Step | Reviewable artifact | Status |
 |---|------|--------------------|--------|
 | **8** | **Fix the dead `validated_before_execute` metric** (§12) — recompute from the tool trace; pin the activity vocabulary | `trace.py` + real-DB test | ✅ **DONE** |
-| **9** | **Multi-seed** — 3–5 seeds/cell, report pass-rate not single runs (§10) | `run.py` seed loop + aggregation | ⏭ **NEXT** |
-| 10 | **Wire the Claude anchor live** — the "% of anchor" ceiling | live anchor run + leaderboard cell | todo |
+| **9** | **Multi-seed + scriptable runs** — N seeds/cell → pass-rate `CellSummary`; `RunConfig` (JSON config + manifest) | `aggregate.py`, `run.py` (`RunConfig`/`run_matrix`), `configs/` | ✅ **DONE** |
+| **10** | **Wire the Claude anchor live** — the "% of anchor" ceiling | live anchor run + leaderboard cell | ⏭ **NEXT** |
 | 11 | **Suite expansion** (T1–T4) + **OpenHands arm** | new cases, `drivers/openhands.py` | todo |
 
 ---
@@ -385,9 +385,14 @@ exact current tags before pulling.
       container-based; OpenCode is not.
 - [ ] Quantization policy: pin one quant per model (Q4_K_M / MLX-4bit) for fair
       comparison; record in `models.yaml`.
-- [ ] Seeds/temperature per cell (default 3–5 @ low temp). **Evidence it's
-      essential:** two identical paraboloid × opencode/qwen3:8b runs gave 1 turn /
-      0 tool calls vs 13 turns / 46 tool calls — a single run is meaningless.
+- [~] Seeds/temperature per cell. **Multi-seed landed (Step 9):** default **3**
+      seeds/cell, reduced to a pass-rate `CellSummary` (`aggregate.py`).
+      **Evidence it's essential:** two identical paraboloid × opencode/qwen3:8b
+      runs gave 1 turn / 0 tool calls vs 13 turns / 46 tool calls. **Still open:**
+      the random seed is NOT yet reproducible (Step 9 uses plain repetition +
+      natural stochasticity); the *matrix* is reproducible via the `RunConfig`
+      manifest (`--config <case>_<stamp>_config.json`). Deterministic per-seed
+      sampling (thread an Ollama seed) is a deferred follow-up.
 
 ---
 
