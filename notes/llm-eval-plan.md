@@ -46,21 +46,29 @@ reported as **"% of the Claude anchor."**
 
 ## 2. Step ladder — the execution plan
 
-Each step is **one reviewable commit** in this repo. Steps 2–6 each get their own
-full spec (the six points above) when we reach them.
+Each step is **one reviewable commit** in this repo. The original ladder (Steps
+1–6) built the harness end-to-end on one case; it is now **complete**. Step 7 and
+beyond are the post-ladder refinements.
 
 | # | Step | Reviewable artifact | Status |
 |---|------|--------------------|--------|
 | **1** | **Repo skeleton** — installable, no logic | `pyproject.toml`, `src/hangar/evals/__init__.py`, `README.md`, `.gitignore` | ✅ **DONE** (see §3) |
-| **2** | **The seam** — resolve `HANGAR_REPO`, compute a Lane A reference | `src/hangar/evals/hangar_ref.py` + `tests/` proving `paraboloid → f_xy == 39.0` | ⏭ **NEXT** (spec in §4) |
-| 3 | **Driver interface + Claude anchor** — port `eval_lane_c.py`'s agent behind `AgentDriver` | `drivers/base.py`, `drivers/claude_sdk.py` + test | todo |
-| 4 | **OpenCode driver** — the local-model arm | `drivers/opencode.py` + the config it writes + test | todo |
-| 5 | **Scoring + trace** — numeric scoring (port) + provenance-DB tool-use metrics | `scoring.py`, `trace.py` + test | todo |
-| 6 | **Runner + one cell** — run `paraboloid × {claude, opencode} × T0` | `run.py` + a results file | todo |
+| **2** | **The seam** — resolve `HANGAR_REPO`, compute a Lane A reference | `src/hangar/evals/hangar_ref.py` + `tests/` proving `paraboloid → f_xy == 39.0` | ✅ **DONE** |
+| **3** | **Driver interface + Claude anchor** — port `eval_lane_c.py`'s agent behind `AgentDriver` | `drivers/base.py`, `drivers/claude_sdk.py` + test | ✅ **DONE** |
+| **4** | **OpenCode driver** — the local-model arm | `drivers/opencode.py` + the config it writes + test | ✅ **DONE** |
+| **5** | **Scoring + trace** — numeric scoring (port) + tool-use + provenance metrics | `scoring.py`, `trace.py` + test | ✅ **DONE** |
+| **6** | **Runner + one cell** — run `paraboloid × {claude, opencode} × T0` | `run.py` + a results file | ✅ **DONE** |
+| **7** | **OpenCode MCP-only restriction** — disable built-ins, persist raw traces | `tools` disable map + `opencode_events.jsonl` | ✅ **DONE** |
 
-We can re-order or split any of these. After Step 6 the harness exists end-to-end
-on one case; suite expansion (T1–T4, CLI track) and the full model×harness×seed
-matrix follow.
+**Harness is end-to-end** on paraboloid T0, validated by the first MLX live runs
+(qwen3:8b / gemma4:26b-mlx / qwen3.6:35b-mlx). Post-ladder work, in priority order:
+
+| # | Step | Reviewable artifact | Status |
+|---|------|--------------------|--------|
+| **8** | **Fix the dead `validated_before_execute` metric** (§12) — recompute from the tool trace; pin the activity vocabulary | `trace.py` + real-DB test | ✅ **DONE** |
+| **9** | **Multi-seed** — 3–5 seeds/cell, report pass-rate not single runs (§10) | `run.py` seed loop + aggregation | ⏭ **NEXT** |
+| 10 | **Wire the Claude anchor live** — the "% of anchor" ceiling | live anchor run + leaderboard cell | todo |
+| 11 | **Suite expansion** (T1–T4) + **OpenHands arm** | new cases, `drivers/openhands.py` | todo |
 
 ---
 
@@ -380,6 +388,45 @@ exact current tags before pulling.
 - [ ] Seeds/temperature per cell (default 3–5 @ low temp). **Evidence it's
       essential:** two identical paraboloid × opencode/qwen3:8b runs gave 1 turn /
       0 tool calls vs 13 turns / 46 tool calls — a single run is meaningless.
+
+---
+
+## 12. Known bugs / follow-ups (found during the first MLX live runs, 2026-06-24/25)
+
+The first real multi-model runs (qwen3:8b floor, gemma4:26b-mlx, qwen3.6:35b-mlx
+on paraboloid T0) surfaced these. None block the harness; record before fixing.
+
+- [x] **`validated_before_execute` was permanently `False` (dead metric).**
+      RESOLVED (Step 8). `trace.py:read_provenance` derived it by looking for an
+      activity_type literally named `"validate"` preceding the first
+      `"execute"`. But omd **never records a `validate` activity** —
+      `validate_plan` writes no activity row at all. Verified: the only
+      activity_types omd actually writes are **`decide`, `execute`, `replan`,
+      `assess`** (`grep activity_type= packages/omd/src/hangar/omd/*.py`). So the
+      lookup was always `None` and the metric could only ever report `False`,
+      even when the agent validated heavily — qwen3.6 called `validate_plan`
+      **8×** and still scored `False`. **Fix:** moved off the provenance DB onto
+      the **harness tool-call trace** — now `ToolUseMetrics.validated_before_execute`
+      = a `validate_plan` call before the first execute tool
+      (`run_plan`/`run_polar`/`run_study`), the only place those calls appear.
+
+- [x] **Provenance metric vocabulary is unverified against the real schema.**
+      RESOLVED (Step 8). Root cause of the bug above. The real, code-confirmed
+      activity set is `decide/execute/replan/assess`; it is now pinned as
+      `trace.OMD_ACTIVITY_TYPES` and guarded by a test asserting the fixture
+      stays within it (so a future omd rename fails loudly, not silently). The
+      test fixture previously used the *fake* `draft`/`validate` names — exactly
+      why the dead metric slipped through — and now uses the real vocabulary.
+
+- [ ] **Upstream (the-hangar) note, not ours:** `omd/db.py:215` docstring lists
+      the activity vocabulary as "draft, revise, validate, execute, assess,
+      replan" — stale vs the code, which writes `decide` (never `draft`,
+      `revise`, or `validate`). Flag to the-hangar; do not fix from this repo.
+
+- [ ] **Single-seed results are not trustworthy (already-known, reconfirmed).**
+      qwen3:8b gave 1-turn vs 13-turn runs on identical cells; gemma4 stalled at
+      4 turns once. The first MLX leaderboard (qwen3.6 PASS-analysis/FAIL-opt,
+      gemma4 no-report) is **indicative only** until multi-seed lands (§10).
 
 ---
 

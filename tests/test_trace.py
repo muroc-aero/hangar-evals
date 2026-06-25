@@ -59,6 +59,41 @@ def test_parse_tool_trace_empty_is_zeroed():
     assert m.total_calls == 0
     assert m.valid_call_rate == 0.0
     assert m.recovery_rate == 0.0
+    assert m.validated_before_execute is None   # nothing executed
+
+
+def test_validated_before_execute_true_when_validate_precedes_run():
+    calls = [
+        ToolCall("validate_plan", ok=True),
+        ToolCall("run_plan", ok=True),
+    ]
+    assert parse_tool_trace(calls).validated_before_execute is True
+
+
+def test_validated_before_execute_false_when_run_without_validate():
+    # The §12 bug case: the agent executed without validating first. This now
+    # reports False from the trace — the provenance DB could never see it.
+    calls = [
+        ToolCall("plan_init", ok=True),
+        ToolCall("run_plan", ok=True),
+        ToolCall("validate_plan", ok=True),   # too late: after the execute
+    ]
+    assert parse_tool_trace(calls).validated_before_execute is False
+
+
+def test_validated_before_execute_none_when_nothing_executed():
+    calls = [ToolCall("validate_plan", ok=True), ToolCall("plan_init", ok=True)]
+    assert parse_tool_trace(calls).validated_before_execute is None
+
+
+def test_validated_before_execute_counts_failed_validate_attempt():
+    # A validate_plan attempt counts even if it failed schema check — the agent
+    # did insert the validation step before executing.
+    calls = [
+        ToolCall("validate_plan", ok=False, error_code="USER_INPUT_ERROR"),
+        ToolCall("run_plan", ok=True),
+    ]
+    assert parse_tool_trace(calls).validated_before_execute is True
 
 
 def test_unrecovered_error_has_no_later_success():
@@ -91,14 +126,18 @@ def _make_db(path):
         );
         """
     )
+    # Uses the activity vocabulary omd ACTUALLY writes (decide/execute/replan/
+    # assess) — NOT the stale draft/validate names. The earlier fixture used the
+    # fake names, which is exactly why a dead validated_before_execute slipped
+    # through: validate_plan records no activity row at all.
     conn.executemany(
         "INSERT INTO activities (activity_id, activity_type, started_at, agent, status) "
         "VALUES (?, ?, ?, ?, ?)",
         [
-            ("a1", "draft", "2026-01-01T00:00:01", "omd", "completed"),
-            ("a2", "validate", "2026-01-01T00:00:02", "omd", "failed"),
-            ("a3", "validate", "2026-01-01T00:00:03", "omd", "completed"),
-            ("a4", "execute", "2026-01-01T00:00:04", "omd", "completed"),
+            ("a1", "decide", "2026-01-01T00:00:01", "omd", "completed"),
+            ("a2", "execute", "2026-01-01T00:00:02", "omd", "failed"),
+            ("a3", "execute", "2026-01-01T00:00:03", "omd", "completed"),
+            ("a4", "assess", "2026-01-01T00:00:04", "omd", "completed"),
         ],
     )
     conn.executemany(
@@ -118,13 +157,27 @@ def test_read_provenance_metrics(tmp_path):
     db = tmp_path / "analysis.db"
     _make_db(db)
     m = read_provenance(db)
-    assert m.activity_order == ["draft", "validate", "validate", "execute"]
+    assert m.activity_order == ["decide", "execute", "execute", "assess"]
     assert m.n_activities == 4
     assert m.n_failed == 1
-    assert m.recovered_activities == 1            # validate failed then completed
-    assert m.validated_before_execute is True
+    assert m.recovered_activities == 1            # execute failed then completed
     assert m.has_decision is True
     assert m.activity_success_rate == 0.75
+
+
+def test_read_provenance_uses_only_real_activity_vocabulary(tmp_path):
+    # Guard against the dead-metric bug: every activity_type the fixture writes
+    # must be in the verified omd vocabulary. If omd ever renames these, this
+    # fails loudly rather than silently zeroing a name-specific metric.
+    from hangar.evals.trace import OMD_ACTIVITY_TYPES
+
+    db = tmp_path / "analysis.db"
+    _make_db(db)
+    m = read_provenance(db)
+    assert set(m.activity_order) <= OMD_ACTIVITY_TYPES
+    # "validate" is NOT an activity omd records — proving why
+    # validated_before_execute cannot come from this DB.
+    assert "validate" not in OMD_ACTIVITY_TYPES
 
 
 def test_read_provenance_missing_db_raises(tmp_path):

@@ -114,6 +114,7 @@ def _tool_metrics_to_dict(m) -> dict:
         "schema_error_rate": m.schema_error_rate,
         "hallucinated_rate": m.hallucinated_rate,
         "recovery_rate": m.recovery_rate,
+        "validated_before_execute": m.validated_before_execute,
     }
 
 
@@ -127,7 +128,6 @@ def _prov_to_dict(p) -> dict | None:
         "n_failed": p.n_failed,
         "activity_success_rate": p.activity_success_rate,
         "recovered_activities": p.recovered_activities,
-        "validated_before_execute": p.validated_before_execute,
         "has_decision": p.has_decision,
     }
 
