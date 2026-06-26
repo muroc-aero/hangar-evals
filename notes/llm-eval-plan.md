@@ -67,8 +67,9 @@ beyond are the post-ladder refinements.
 |---|------|--------------------|--------|
 | **8** | **Fix the dead `validated_before_execute` metric** (§12) — recompute from the tool trace; pin the activity vocabulary | `trace.py` + real-DB test | ✅ **DONE** |
 | **9** | **Multi-seed + scriptable runs** — N seeds/cell → pass-rate `CellSummary`; `RunConfig` (JSON config + manifest) | `aggregate.py`, `run.py` (`RunConfig`/`run_matrix`), `configs/` | ✅ **DONE** |
-| **10** | **Wire the Claude anchor live** — the "% of anchor" ceiling | live anchor run + leaderboard cell | ⏭ **NEXT** |
+| **10** | **Wire the Claude anchor live** — the "% of anchor" ceiling; contamination guard on the anchor | `[anchor]` install, `configs/paraboloid_claude.json`, tightened `_DISALLOWED_TOOLS` + `setting_sources=[]`, `test_claude_sdk.py` | ✅ **DONE** |
 | 11 | **Suite expansion** (T1–T4) + **OpenHands arm** | new cases, `drivers/openhands.py` | todo |
+| 12 | **Live run progress** — watch seeds/turns/tokens during a run (§12) | streaming driver + driver-agnostic progress callback | todo |
 
 ---
 
@@ -381,8 +382,35 @@ exact current tags before pulling.
       clean trace. omd schema errors arrive as tool OUTPUT (status stays
       "completed"), so classify on the error envelope, not the status.
       (OpenHands trace exposure still TBD when that arm lands.)
+- [~] **Contamination model — reframed (2026-06-26).** The eval's real threat is
+      *test-set contamination*, NOT tool fairness: **different tool surfaces
+      across arms are fine** (that's the "grade the whole model+harness system"
+      premise) — what must be prevented is the agent reaching **privileged
+      context**: the-hangar source, the eval scoring code, the Lane-A reference
+      answers, or hangar/omd-specific **skills/memory**. Implication: the right
+      end state is a **filesystem sandbox** (reachability control) where rich
+      Bash/Read/Write are *allowed* — there's simply nothing privileged to find —
+      **plus** a small harness-level guard for vectors a filesystem sandbox can't
+      stop. **Inspect AI rejected** for this (its standardized-scaffold model
+      drops the "harness under test" premise; we keep native OpenCode/SDK).
+      What a filesystem sandbox does NOT close (must stay harness-level):
+        * **Memory / CLAUDE.md** — harness-*injected* into the system prompt, not
+          file-read. Fixed on the anchor via `setting_sources=[]` (Step 10).
+        * **Skills** — harness-injected; `Skill` tool blocklisted (Step 10).
+        * **Network** — the LLM API needs it, so WebSearch/WebFetch are denied at
+          the *tool* level, not the sandbox boundary.
+      Architecture constraint for the sandbox step: **omd MCP server must run
+      OUTSIDE the agent sandbox** (it needs `HANGAR_REPO`), exposed only as the
+      stdio/socket channel — else the agent reads the-hangar through omd's own
+      files. Also audit: `ListMcpResourcesTool`/`ReadMcpResourceTool` are benign
+      *only while* omd exposes no reference answers as MCP resources.
+- [ ] **Filesystem sandbox (future step).** Give each run a clean scratch
+      workspace (no repo/answers reachable) and **relax** the interim filesystem
+      blocklist in `_DISALLOWED_TOOLS` (`_INTERIM_FILESYSTEM_TOOLS`) so the agent
+      may use Bash/Read/Write to help drive omd. Until then those tools stay
+      blocked because the anchor's cwd *is* the-hangar repo (the answers).
 - [ ] CLI-track sandboxing (Bash allowed) — container per run? OpenHands is
-      container-based; OpenCode is not.
+      container-based; OpenCode is not. (Folds into the filesystem-sandbox step.)
 - [ ] Quantization policy: pin one quant per model (Q4_K_M / MLX-4bit) for fair
       comparison; record in `models.yaml`.
 - [~] Seeds/temperature per cell. **Multi-seed landed (Step 9):** default **3**
@@ -432,6 +460,146 @@ on paraboloid T0) surfaced these. None block the harness; record before fixing.
       qwen3:8b gave 1-turn vs 13-turn runs on identical cells; gemma4 stalled at
       4 turns once. The first MLX leaderboard (qwen3.6 PASS-analysis/FAIL-opt,
       gemma4 no-report) is **indicative only** until multi-seed lands (§10).
+
+- [ ] **Live run progress / watchability (Step 12).** Today a run is BLIND
+      mid-seed: `OpenCodeDriver` uses a blocking `subprocess.run(capture_output)`,
+      so nothing prints until a seed finishes — and a qwen3.6 seed is ~13 min. We
+      want to watch seeds complete + the in-flight seed's turns / tool-calls /
+      cumulative tokens. **Approach:** stream instead of buffer — `Popen` +
+      read `--format json` JSONL line-by-line (we already parse those events),
+      teeing to `opencode_events.jsonl` as today; update a live status line from
+      `step_finish` token counts + `tool_use` events. Expose it as a
+      **driver-agnostic progress callback** (`on_event(seed, turns, tool_calls,
+      tokens)`) so the Claude SDK driver (async message stream) reports through
+      the same interface. A coarse `tqdm` bar over the seed/cell matrix can sit
+      on top. **No-overhead requirements:** (1) no model/runtime cost — it's just
+      parsing a stream we already capture; (2) **TTY-gated** — auto-silence when
+      stdout isn't a terminal (background runs pipe to a log; a progress bar
+      there is noise — which is exactly the `run_q36.log` case today); (3) keep
+      `tqdm` an OPTIONAL extra (base stays dep-free) or use a stdlib
+      carriage-return status line; throttle redraws. Verify it doesn't change the
+      hang-avoidance contract (`stdin=DEVNULL`).
+
+      **Also part of Step 12 — results viewing + a USER-DRIVEN run handoff.**
+      Two gaps the agent-run-it model hides:
+        * **View results, not raw JSON.** Today the output is three
+          `results/*.json[l]` files the user has to read by hand. Need an
+          ergonomic way to see a finished run: a small viewer/`report.py` (cell
+          summary + per-seed pass/fail + a pointer into each seed's
+          `opencode_events.jsonl` trace), or at minimum documented one-liners.
+          Pairs with the (later) leaderboard.
+        * **Hand the run to the user, with step-by-step instructions.** So far
+          the *agent* launches every run, so the user has never experienced the
+          live UX firsthand. Step 12 should produce a short runbook (start a run,
+          watch progress, open the results, find a seed's trace) and have the
+          **user drive a run themselves** and give feedback on what's missing.
+          The agent-run path masks exactly the rough edges (blind waits, raw
+          JSON, finding traces) this step exists to fix — a human-in-the-loop
+          pass is the acceptance test for the progress/viewer work.
+
+- [ ] **Study prior-art OSS eval tooling/benchmarks and adopt what fits.**
+      Before hardening our scoring, completion, and reliability metrics, see how
+      the best agent/LLM benchmarks solve the exact problems we just hit.
+      *(Deep-research pass done 2026-06-26 — findings below. Versions/IDs churn
+      fast; verify before formal citation.)*
+
+      **Two grading philosophies — pick effect-based.** Trajectory/AST grading
+      (BFCL v1/v2, agentevals strict-match, DeepEval ToolCorrectness) matches the
+      *sequence* of tool calls — deterministic but brittle: many valid tool paths
+      reach the same correct artifact, so it yields false negatives. Effect/
+      final-state grading (SWE-bench, τ-bench, AppWorld, Terminal-Bench,
+      BikeBench, SimulCost) compares the *final artifact/world-state* to a
+      reference. **Effect-based is the correct primary grader for parity** — this
+      is the direct fix for seed-0's "correct-but-prose got 0 credit": grade the
+      **omd run results / provenance DB** (what the agent actually ran), keep the
+      fenced-JSON self-report as a *secondary* signal only.
+
+      **How the references handle our four criteria:**
+        * **SWE-bench / Verified** — execution-based (apply patch in Docker, run
+          hidden FAIL_TO_PASS + PASS_TO_PASS tests); pass@1 (some pass@3);
+          harness-agnostic, *grades the whole model+scaffold and requires scaffold
+          disclosure*; "Verified" = 500 tasks human-filtered by 93 devs.
+        * **τ-bench / tau2-bench (Sierra)** — final DB/world-state vs hand-
+          annotated goal state; **introduced pass^k** (all k trials pass, ≈ p^k).
+          Key lesson: GPT-4o pass^8 ~25% in retail vs much higher pass^1 —
+          *reliability collapses under repetition*. This is our 0/3 finding
+          formalized. Known flaw to guard against: **"pass by doing nothing"**
+          when a task doesn't change state.
+        * **Terminal-Bench (1.0/2.0)** — per-task container + human reference
+          solution + verification tests; runs **≥5 repeats**, variance-aware; 2.0
+          *standardizes the harness* to isolate harness-vs-model effects (the
+          harness materially moves scores). Feeds §10 CLI sandboxing + OpenHands.
+        * **BFCL (v1–v4)** — v1/v2 AST match, v3 state-based, v4 holistic agentic;
+          separate ast_checker / executable_checker. Reference for grading
+          `trace.py` tool-use more rigorously than valid/schema-error counts —
+          but as a *secondary* check, not the parity grader.
+        * **BikeBench** — closest published engineering analog: simulator/
+          analytical evaluators over ~10 objectives + ~40 constraints, grades the
+          **final design artifact** not a trajectory. Finding: LLMs underperform
+          optimization/hybrid methods. Closest in spirit to our Lane-A oracle.
+        * Also noted: **AppWorld** (gold standard for reproducible state isolation
+          — versioned DB, exact resets, hash-diffing, catches collateral edits);
+          **MLE-bench** (pass@1 *and* pass@k; o1-preview 16.9%→34.1% at pass@8).
+
+      **Directly-analogous physics-solver benchmarks (2025–26) — track these:**
+        * **PETScAgent-Bench** — near-exact architectural analog: A2A between
+          evaluator and model-under-test, MCP for compile/execute tools.
+        * **PDEAgent-Bench** — PDE→solver gen; case-level pass rate with
+          sub-metrics (executability, numerical accuracy, efficiency, quality).
+        * **SimulCost** — success rate + **cost-efficiency** on solver param tuning.
+        * **PhysCodeBench / AInsteinBench** — executability + physical accuracy
+          (residuals, conservation/invariant checks). Caveat we must heed:
+          *"acceptable conservation violation is highly scenario-dependent" — set
+          per-quantity tolerances, never one global epsilon.*
+
+      **Reliability metric guidance:** report **pass@1, pass@k, AND pass^k**
+      together. pass^k (all k runs pass) is the production-relevant one — an agent
+      that hits parity 1-in-3 is not usable. Treat solver non-determinism
+      (threading, BLAS, RNG) explicitly: fix seeds where possible; widen tolerance
+      only with physical justification, never to mask flakiness.
+
+      **Recommended stack (from the research):**
+        1. **Inspect AI (UK AISI)** as harness/grader backbone — harness-agnostic
+           Task/Solver/Scorer, native **MCP tool support**, sandboxed Docker/K8s,
+           and (the key fit) a custom `@scorer` can **read the sandbox after a run**
+           (`await sandbox().read_file()/.exec()`) to do deterministic physics-
+           tolerance grading. `epochs=Epochs(k, reducers)` computes pass_at(k)/
+           at_least(k) natively; a community **pass^k reducer** exists and is
+           trivial to add. MIT; used by METR/Apollo/Anthropic/DeepMind. **This is
+           the recommended path to evaluate vs. continuing to hand-roll `run.py`.**
+        2. A standalone **`is_parity(candidate, reference, tol)`** predicate module
+           with **per-quantity absolute + relative tolerances** — importable into
+           an Inspect/MLflow/OpenAI-style grader so it's portable across harnesses.
+        3. **Opik or Phoenix** (OSS, self-host) for trace observability of *failed*
+           parities — debugging aid, NOT the authoritative grader.
+        4. DeepEval / agentevals for *secondary* tool-call/trajectory checks in CI.
+      Other frameworks weighed: MLflow GenAI evaluate (Trace-based `@scorer`, good
+      if we want experiment tracking too); Promptfoo (CI/YAML, `--repeat N`);
+      HELM (leaderboards, not custom execution grading). **Avoid** building on the
+      hosted OpenAI Evals/Graders platform — being deprecated (read-only 2026-10-31,
+      shutdown 2026-11-30); copy the open-source grader *pattern* only.
+
+      **ABC checklist** (arXiv:2507.02825, "Best Practices for Building Rigorous
+      Agentic Benchmarks") — adopt as our acceptance criteria:
+        * **Validate the oracle:** a known-good run passes; a perturbed run fails;
+          "doing nothing" / returning the initial state *cannot* pass.
+        * **Reproducible episodes:** pin solver versions in a sandbox; AppWorld-
+          style state reset/isolation between cases.
+        * **Per-quantity absolute + relative tolerances** with physical
+          justification — not one global epsilon.
+        * **Pin a reference harness** but keep a stable task API and require
+          scaffold disclosure for external submissions.
+        * ABC found flaws in most popular benchmarks that mis-estimate performance
+          by up to 100% relative — task-validity + outcome-validity checks matter.
+
+      **Net design implications for us:** (1) flip the primary grader to side
+      effects (omd results/provenance), demote the fenced-JSON; (2) add pass^k to
+      the aggregate alongside the mean; (3) build/borrow `is_parity()` with
+      per-quantity tolerances; (4) add an oracle self-test (good passes, perturbed
+      fails, no-op fails); (5) **seriously evaluate adopting Inspect AI** rather
+      than growing `run.py` further — it already provides MCP + sandbox-reading
+      scorers + native pass@k. Open question for a future step: migrate to Inspect
+      AI now (before more harness code accretes) vs. after the anchor lands (§10).
 
 ---
 
