@@ -88,9 +88,11 @@ CASES: dict[str, Case] = {
         metrics=[
             Metric("analysis_f_xy", "analysis", "f_xy", rtol=1e-6),
             Metric("opt_f_xy", "optimization", "f_xy", rtol=1e-4),
-            # DV retrieval through the tool surface is a known gap; score, don't fail.
-            Metric("opt_x", "optimization", "x", rtol=1e-3, required=False),
-            Metric("opt_y", "optimization", "y", rtol=1e-3, required=False),
+            # x/y are REQUIRED for the effect grader (run_cases stores them
+            # directly), but DV retrieval through the TOOL surface is a known
+            # gap, so the self-report keeps them WARN-only (Step 11, §4c risk 2).
+            Metric("opt_x", "optimization", "x", rtol=1e-3, report_required=False),
+            Metric("opt_y", "optimization", "y", rtol=1e-3, report_required=False),
         ],
     ),
 }

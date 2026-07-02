@@ -20,12 +20,31 @@ from hangar.evals.drivers.base import AgentResult, MCPServerSpec
 from hangar.evals.hangar_ref import resolve_hangar_repo
 from hangar.evals.trace import HALLUCINATED_CODE, ToolCall, parse_omd_error_code
 
-# Tools the anchor is never allowed to use: it must work through MCP alone, so
-# its tool-use is comparable to a local model with the same restriction.
-_DISALLOWED_TOOLS = [
-    "Bash", "Read", "Write", "Edit", "Glob", "Grep",
-    "WebFetch", "WebSearch", "Task", "NotebookEdit",
+# Tool restriction here is an INTERIM contamination guard, not the final design.
+#
+# The eval's threat model is *test-set contamination*: the agent must not reach
+# privileged context (the-hangar source, the eval scoring code, the Lane-A
+# reference answers, or hangar/omd-specific skills/memory). It is NOT about
+# forcing the agent through MCP alone — rich file/shell tools are a legitimate
+# harness affordance that SHOULD be available once a filesystem sandbox isolates
+# the workspace. Two groups, blocked for different reasons:
+#
+# (1) Filesystem/shell — blocked ONLY because the agent's cwd is currently the
+#     the-hangar repo itself (see resolve_hangar_repo), which holds the solver
+#     source, scoring code, and reference answers. Under a sandbox with a clean
+#     scratch workspace these should be RE-ALLOWED.
+_INTERIM_FILESYSTEM_TOOLS = [
+    "Bash", "Read", "Write", "Edit", "Glob", "Grep", "NotebookEdit", "Task",
 ]
+# (2) Privileged-context / external-knowledge — blocked even under a sandbox,
+#     because a filesystem sandbox would NOT stop them (they ride in through the
+#     harness or the network): Skill injects privileged procedural knowledge
+#     (possibly hangar/omd-specific); WebSearch/WebFetch pull external knowledge
+#     (a future "web-allowed" track may re-enable these). ToolSearch is
+#     deliberately NOT blocked — it only discovers tools the agent is already
+#     permitted to use, leaking no privileged context.
+_CONTAMINATION_TOOLS = ["Skill", "WebSearch", "WebFetch"]
+_DISALLOWED_TOOLS = _INTERIM_FILESYSTEM_TOOLS + _CONTAMINATION_TOOLS
 
 
 def _normalize_tool_name(name: str, server: str) -> str:
@@ -124,6 +143,12 @@ class ClaudeAgentSDKDriver:
             model=model,
             max_turns=max_turns,
             permission_mode="bypassPermissions",
+            # Starve ambient context: do NOT load CLAUDE.md / user|project memory
+            # / settings from disk. They may carry hangar/omd discussion or prior
+            # task formulations (test-set contamination) that a filesystem
+            # sandbox would not stop — the harness injects them. The task comes
+            # from the prompt alone.
+            setting_sources=[],
             mcp_servers={
                 mcp.name: {
                     "type": "stdio",

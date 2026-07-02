@@ -42,11 +42,12 @@ class CellSummary:
     model: str | None
     n_seeds: int
     seeds: list[int]
-    n_completed: int                 # produced a parseable report
-    n_passed: int                    # all required metrics PASS
+    n_completed: int                 # >=1 successful execute (Step 11 semantics)
+    n_passed: int                    # all required metrics PASS (effect-graded)
+    n_report_parsed: int             # emitted a parseable fenced-JSON report
     completion_rate: float
     pass_rate: float
-    per_metric_pass: dict[str, int]  # metric key -> PASS count across seeds
+    per_metric_pass: dict[str, int]  # metric key -> effect-PASS count across seeds
     turns: Stat | None
     wall_clock_s: Stat | None
     valid_call_rate: Stat | None
@@ -77,6 +78,9 @@ def aggregate_cell(records: list[dict]) -> CellSummary:
     n = len(records)
     n_completed = sum(bool(r.get("completed")) for r in records)
     n_passed = sum(bool(r.get("passed")) for r in records)
+    n_report_parsed = sum(
+        bool((r.get("reporting") or {}).get("parsed")) for r in records
+    )
 
     per_metric_pass: dict[str, int] = {}
     for r in records:
@@ -96,6 +100,7 @@ def aggregate_cell(records: list[dict]) -> CellSummary:
         seeds=[r.get("seed") for r in records],
         n_completed=n_completed,
         n_passed=n_passed,
+        n_report_parsed=n_report_parsed,
         completion_rate=n_completed / n,
         pass_rate=n_passed / n,
         per_metric_pass=per_metric_pass,
