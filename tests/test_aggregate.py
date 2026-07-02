@@ -69,6 +69,15 @@ def test_aggregate_all_no_report_is_zero_pass_but_keeps_telemetry():
     assert s.valid_call_rate == Stat(min=1.0, median=1.0, max=1.0)
 
 
+def test_aggregate_counts_parsed_reports():
+    records = [_record(0), _record(1), _record(2)]
+    records[0]["reporting"] = {"parsed": True}
+    records[1]["reporting"] = {"parsed": False}
+    # records[2] has no reporting key (pre-Step-11 record) — tolerated as unparsed.
+    s = aggregate_cell(records)
+    assert s.n_report_parsed == 1
+
+
 def test_aggregate_to_dict_is_json_shaped():
     s = aggregate_cell([_record(0)])
     d = s.to_dict()

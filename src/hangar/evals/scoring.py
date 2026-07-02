@@ -1,30 +1,38 @@
-"""Numeric correctness scoring — self-reported metrics vs Lane A references.
+"""Numeric correctness scoring — candidate values vs Lane A references.
 
-The primary eval signal: parse the agent's fenced-JSON report, then compare
-each reported metric against the trusted Lane A value (computed through the
-Step-2 ``hangar_ref`` seam) within a per-metric relative tolerance. A faithful
-port of ``eval_lane_c.py``'s scoring, refactored to RETURN structured results
-instead of printing — presentation is ``report.py``'s job (Step 6).
+The shared comparator for BOTH graders (Step 11): the effect-based oracle
+(``oracle.py``, PRIMARY — values read from the omd provenance DB) and the
+reporting-fidelity check (SECONDARY — values parsed from the agent's
+fenced-JSON report). Each metric is compared against the trusted Lane A value
+(computed through the Step-2 ``hangar_ref`` seam) within a per-metric relative
+tolerance. A port of ``eval_lane_c.py``'s scoring, refactored to RETURN
+structured results instead of printing — presentation is ``report.py``'s job.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from hangar.evals.hangar_ref import lane_a_reference
 
 
 @dataclass(frozen=True)
 class Metric:
-    """One scored quantity: a key the agent reports, tied to a Lane A value."""
+    """One scored quantity, tied to a Lane A reference value."""
 
     key: str            # flat key under the report's "metrics" object
     lane_a_module: str  # <example>.lane_a.<module> whose run() holds the reference
     lane_a_key: str     # key in that run()'s return dict
     rtol: float
-    required: bool = True  # False: a miss/over-tol is a WARN, not a FAIL
+    required: bool = True  # PRIMARY (effect) grader: False -> miss is WARN, not FAIL
+    # Reporting-fidelity grader's required flag; None -> same as `required`.
+    # Lets a metric be required-by-effect (the DB always has it) while staying
+    # WARN-only in the self-report (tool-surface retrieval may be unreliable).
+    report_required: bool | None = None
+    # Key in the run's `run_cases` final data (effect oracle); None -> lane_a_key.
+    effect_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,16 +79,29 @@ def compute_refs(example: str, metrics: list[Metric]) -> dict[str, dict]:
     return {mod: lane_a_reference(example, mod) for mod in modules}
 
 
-def score_report(
-    metrics: list[Metric], report: dict, refs: dict[str, dict]
+def for_reporting(metrics: list[Metric]) -> list[Metric]:
+    """The metric list as the reporting-fidelity grader sees it.
+
+    Applies ``report_required`` where set, so a metric can be required for the
+    effect grader but WARN-only in the self-report.
+    """
+    return [
+        m if m.report_required is None else replace(m, required=m.report_required)
+        for m in metrics
+    ]
+
+
+def score_values(
+    metrics: list[Metric], values: dict, refs: dict[str, dict]
 ) -> ScoreResult:
-    """Score a parsed report against Lane A references.
+    """Score candidate metric values against Lane A references.
 
     A required metric that is missing/non-numeric or outside ``rtol`` FAILs;
     the same on an optional metric is a WARN. Overall ``passed`` is true iff
-    every required metric PASSes.
+    every required metric PASSes. ``values`` may come from the effect oracle
+    or from a parsed self-report — the comparator doesn't care.
     """
-    reported = report.get("metrics", {}) or {}
+    reported = values or {}
     scores: list[MetricScore] = []
     ok = True
 
@@ -99,3 +120,11 @@ def score_report(
         scores.append(MetricScore(m.key, ref, float(got), rel, verdict))
 
     return ScoreResult(scores=scores, passed=ok)
+
+
+def score_report(
+    metrics: list[Metric], report: dict, refs: dict[str, dict]
+) -> ScoreResult:
+    """Score a parsed fenced-JSON report (its ``metrics`` object) — see
+    ``score_values`` for the semantics."""
+    return score_values(metrics, report.get("metrics", {}) or {}, refs)
