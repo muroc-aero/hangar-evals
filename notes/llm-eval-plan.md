@@ -68,8 +68,24 @@ beyond are the post-ladder refinements.
 | **8** | **Fix the dead `validated_before_execute` metric** (§12) — recompute from the tool trace; pin the activity vocabulary | `trace.py` + real-DB test | ✅ **DONE** |
 | **9** | **Multi-seed + scriptable runs** — N seeds/cell → pass-rate `CellSummary`; `RunConfig` (JSON config + manifest) | `aggregate.py`, `run.py` (`RunConfig`/`run_matrix`), `configs/` | ✅ **DONE** |
 | **10** | **Wire the Claude anchor live** — the "% of anchor" ceiling; contamination guard on the anchor | `[anchor]` install, `configs/paraboloid_claude.json`, tightened `_DISALLOWED_TOOLS` + `setting_sources=[]`, `test_claude_sdk.py` | ✅ **DONE** |
-| 11 | **Suite expansion** (T1–T4) + **OpenHands arm** | new cases, `drivers/openhands.py` | todo |
-| 12 | **Live run progress** — watch seeds/turns/tokens during a run (§12) | streaming driver + driver-agnostic progress callback | todo |
+| **11** | **Effect-based grading + oracle self-test** — grade omd side effects (`run_cases`), demote the fenced-JSON self-report | `oracle.py` + `run.py` rewiring + ABC tests | ⏭ **NEXT (spec below §4c)** |
+| 12 | **Reporting rigor** — pass@1/pass@k/**pass^k** in the aggregate; pin environment versions in the manifest (incl. explicit anchor model); surface token counts | `aggregate.py`, `run.py` manifest | todo |
+| 13 | **omd-over-HTTP decoupling** — omd as a host-side HTTP service; parity test stdio↔HTTP (extracted from the old sandbox Task 1) | `MCPServerSpec` HTTP variant + launcher + parity test | todo |
+| 14 | **Filesystem sandbox — container-per-run (colima)** — clean workspace OUTSIDE this repo; relax the interim tool blocklist | container image + `drivers/sandbox.py` + isolation test | todo (spec §4b, amended) |
+| 15 | **Suite expansion** (T1 + T3 first) + per-case **task-validity** check (a scripted tool sequence reproduces Lane A) | new cases + scripted-baseline proofs | todo |
+| 16 | **OpenHands arm + deconfounding cells** — same local model through both harnesses; a Claude-via-OpenCode cell to split model vs harness ceiling | `drivers/openhands.py` + configs | todo |
+| 17 | **Live run progress** — watch seeds/turns/tokens during a run (§12) | streaming driver + driver-agnostic progress callback | todo |
+
+> **Ladder reordered 2026-07-02** after an external review against τ-bench /
+> SWE-bench / BikeBench / Terminal-Bench practice (full findings in §12b):
+> effect-based grading jumped ahead of the sandbox because the interim tool
+> blocklist already guards contamination *today*, while the self-report grader
+> corrupts every result collected until it flips — and every case added before
+> the flip inherits the format-brittleness. The sandbox goes straight to
+> containers (old Option B): the user runs colima, OpenHands (Step 16) forces
+> containers anyway, and `sandbox-exec` is a quasi-deprecated detour. The
+> omd-over-HTTP work is the shared enabler either way, so it becomes its own
+> step (13).
 
 ---
 
@@ -166,7 +182,7 @@ gitignored scratch — captured here so it isn't lost; Step 4 productionizes it)
 
 ---
 
-## 4. Step 2 spec — the seam (NEXT, for review)
+## 4. Step 2 spec — the seam (DONE — kept for the record)
 
 **Purpose.** First runnable, reviewable logic: a single module that resolves the
 path to the-hangar from `HANGAR_REPO` and computes a Lane A reference value by
@@ -192,6 +208,240 @@ the-hangar is. Everything downstream imports refs/tolerances through it.
 goes green; flip `HANGAR_REPO` to a bad path and see a clear error.
 
 *(Open the spec for Steps 3–6 when we reach them.)*
+
+---
+
+## 4b. Step 14 spec — filesystem sandbox, container-per-run (amended 2026-07-02)
+
+> **Amendments (2026-07-02 review):** (1) mechanism **DECIDED** — container-per-
+> run on colima (old Option B); `sandbox-exec` (old Option A) dropped. (2) The
+> omd HTTP decoupling ("Task 1") is **extracted to its own Step 13** — it is the
+> shared enabler and independently testable. (3) Threat model gains item (e):
+> the per-run workspace itself must move OUT of this repo. (4) Renumbered
+> Step 11 → 14 after effect-based grading (§4c) was promoted ahead of it.
+
+**Purpose.** Give each run a clean, isolated filesystem so the agent can be handed
+rich Bash/Read/Write tools *without* test-set contamination — then **relax the
+interim `_INTERIM_FILESYSTEM_TOOLS` blocklist** added in Step 10. This is the
+end state the contamination reframe (§10) pointed at: control *reachability*, not
+the tool list. It is also the isolation the OpenHands/CLI track (Step 16) needs,
+so we build it once, here.
+
+**Threat model (what the sandbox must make unreachable).** From inside a run, the
+agent must NOT be able to read: (a) the-hangar source (solvers, `eval_lane_c.py`,
+the scoring engine), (b) this repo's `hangar.evals` scoring code, (c) the Lane-A
+**reference answers**, (d) the user's `~/.claude` memory / project `CLAUDE.md`
+(the anchor's memory vector is already closed via `setting_sources=[]`; the local
+arm needs the same starvation), and **(e) this repo itself via the workspace**:
+today `run_cell` creates `data_root` under `results/run_data/` INSIDE
+hangar-evals, and OpenCode runs with `--dir <data_root>` — once filesystem tools
+are re-allowed, `../..` from the agent's cwd is the scoring code and a
+`results/` directory full of prior answers. The per-run workspace must live
+OUTSIDE this repo (temp root), whatever the mechanism; the container mount
+closes it structurally. It MAY freely read/write a per-run scratch
+workspace, reach the model endpoint (Ollama on host), and drive omd via its tools.
+
+**Core architectural change — decouple omd from the agent's filesystem.** Today
+each driver spawns omd as a *child* (`sys.executable -m hangar.omd.server`, stdio)
+inheriting the agent's cwd — and that cwd is the-hangar repo. Under a sandbox a
+child omd would inherit the filesystem deny and couldn't reach the-hangar. So omd
+must run as a **host-side sibling service the agent connects to over a channel**,
+never as a child in the agent's FS. **Enabler (verified):** omd is a FastMCP
+server with an **HTTP transport** (`server.py:80`). So:
+  * **omd runs on the host** with `HANGAR_REPO` set, serving HTTP on
+    `127.0.0.1:<port>` (one instance per run, state rooted at the run's
+    `data_root`, as `MCPServerSpec.omd` already arranges via `OMD_*`).
+  * the **agent connects to that URL** — it gets the omd tools but no filesystem
+    path to the-hangar. `MCPServerSpec` grows an HTTP/remote variant alongside the
+    stdio one; the drivers render it (Claude SDK: `{"type":"http","url":...}`;
+    OpenCode: the remote-server form in `opencode.json`).
+  * **Task 1 (de-risk first — EXTRACTED to Step 13):** confirm the exact omd HTTP launch incantation
+    (transport flag / env, host/port, whether auth/OIDC can be disabled for a
+    localhost loopback) and that a run scores identically over HTTP vs stdio.
+
+**Agent isolation mechanism — the decision for sign-off.** Two options, same omd
+decoupling underneath:
+  * **(A) macOS `sandbox-exec` (Seatbelt) profile** — wrap the harness subprocess
+    in a profile that denies file reads outside the per-run scratch workspace
+    (allow: workspace, the harness's own binaries/libs, loopback network for
+    Ollama + omd). *Pro:* lightest, host-native, no colima, lands in one commit;
+    works for both OpenCode and the Claude CLI. *Con:* `sandbox-exec` is
+    quasi-deprecated (still ships on macOS 15); profiles are fiddly; covers the
+    local Mac only.
+  * **(B) container-per-run (colima/Docker)** — run the harness in a container
+    with only a scratch volume mounted; reach Ollama + omd on the host via
+    loopback. *Pro:* strongest, reproducible, **shared with the OpenHands arm**
+    (Step 16 is container-based anyway); portable to CI. *Con:* heaviest —
+    host-networking to Ollama, image build, and the omd-over-HTTP bridge all land
+    at once; colima specifics (user runs colima, not Docker Desktop).
+  * **DECIDED (2026-07-02): (B) container-per-run on colima.** Pay the container
+    cost once: the user already runs colima, the OpenHands arm (Step 16) forces
+    containers regardless, and `sandbox-exec` is a quasi-deprecated detour we'd
+    maintain briefly then discard. With the omd-over-HTTP work extracted to
+    Step 13, B's remaining scope is: image + scratch-volume mount + reaching
+    host Ollama/omd from the container (colima supports `host.docker.internal`
+    on recent versions; verify on the installed one, fallback the VM gateway
+    IP). Containers also close threat (e) structurally — there is nothing to
+    traverse up to.
+
+**Artifact (Option B path — amended 2026-07-02).**
+```
+containers/harness.Dockerfile         # OpenCode (+ pinned version) image the run executes in
+src/hangar/evals/drivers/sandbox.py   # per-run scratch workspace (OUTSIDE the repo) +
+                                      #   container-run wrapper (mounts, host networking)
+  (+ small wiring in claude_sdk.py / opencode.py: workspace cwd + the omd URL from Step 13)
+tests/test_sandbox.py                 # the isolation proof (below)
+```
+*(The `MCPServerSpec` HTTP variant + host-side omd launcher land in Step 13.)*
+
+**Acceptance test (the isolation proof + ABC oracle self-test).**
+  1. **Isolation:** from inside the sandbox, an attempt to read a known the-hangar
+     path (`packages/omd/examples/agent_eval/eval_lane_c.py`) AND the Lane-A
+     reference value/answer file FAILS (no such file / permission denied).
+  2. **Channel intact:** the omd tools still work over HTTP (a trivial
+     `start_session`/`plan_init` round-trips).
+  3. **Task unbroken:** a paraboloid run still completes and the anchor still
+     **PASSES** end-to-end (re-run the Step-10 smoke, now sandboxed).
+  4. **Blocklist relaxed:** with `_INTERIM_FILESYSTEM_TOOLS` removed, the agent
+     can read/write inside its scratch workspace but step (1) still FAILS.
+  5. **Oracle self-test (carry-over to effect-grading):** a no-op run cannot
+     "pass by doing nothing."
+
+**Non-goals (keep the commit reviewable).** No effect-based grading (Step 11,
+§4c — lands before this); no omd HTTP work (Step 13 — lands before this); no
+OpenHands arm (Step 16); no new cases; no CI containerization.
+Just: clean external workspace + container isolation proven + blocklist relaxed.
+
+**Risks.** (1) omd HTTP transport auth/OIDC on loopback — now Step 13's risk,
+retired before this step starts. (2) Container→host networking on colima
+(`host.docker.internal` support varies by colima/docker version) — verify
+early; fallback is the VM gateway IP. (3) OpenCode's remote-MCP config shape
+needs verifying (we only proved the stdio form in Step 4). (4) Per-run host omd
+process lifecycle (port allocation, teardown on crash) — reuse the `data_root`
+temp-dir discipline. (5) Image drift vs the brew-installed OpenCode — pin the
+OpenCode version in the Dockerfile and record it in the run manifest (Step 12).
+
+**Git.** One commit, `feat: per-run container sandbox — workspace isolation (Step 14)`.
+User reviews/merges.
+
+**Open decisions for sign-off.**
+  * ~~Mechanism~~ — **RESOLVED (2026-07-02): (B) container-per-run on colima.**
+  * ~~omd transport~~ — **moved to Step 13** (its own step + stdio↔HTTP parity test).
+  * **Scope:** relax the blocklist in *this* commit (recommended — it's the point)
+    or in a follow-up once isolation is proven?
+
+---
+
+## 4c. Step 11 spec — effect-based grading + oracle self-test (NEXT, for review)
+
+**Purpose.** Flip the PRIMARY grader from the agent's fenced-JSON self-report to
+the **side effects of what the agent actually ran** — the omd run outputs
+persisted in the run's own `data_root` — compared against Lane A. This is the
+direct fix for the seed-0 injustice (§12: a qwen3.6 run computed the correct
+optimum but emitted prose → scored NO REPORT on format alone), and it aligns
+the eval with every final-state benchmark in the §12 survey (SWE-bench,
+τ-bench, AppWorld, Terminal-Bench, BikeBench). It must land BEFORE suite
+expansion (Step 15) so every new case is born effect-graded, and before any
+result we intend to keep.
+
+**Ground truth located (recon 2026-07-02, on the passed anchor run
+`paraboloid_claude_s0_8lylywo8`).** The oracle does NOT need to parse
+`omd_data` HTML/YAML — the provenance DB's **`run_cases` table already stores
+the numbers**:
+  * `run_cases(case_type='final')` per `run_id` holds the output dict —
+    analysis run: `{"paraboloid.f_xy": 39.0, "x": 1.0, "y": 2.0, "f_xy": 39.0}`;
+    optimize run (row `iteration`=8): `{"paraboloid.f_xy": -27.3333…,
+    "x": 6.66662…, "y": -7.33331…, "f_xy": -27.3333…}`.
+  * `activities` rows `act-execute-<run_id>` give per-run execute status;
+    `entities` has a `run_record` per run (`storage_ref` → `recordings/*.sql`).
+  * Optimizer runs additionally have `case_type='driver'` iteration rows — a
+    candidate mode discriminator.
+
+**Task 1 (small de-risk, inside this step).** Pick + pin the run-**mode**
+discriminator (analysis vs optimize vs polar/study). Candidates: presence of
+`driver` rows; the `prov_edges` linkage run → plan + the plan YAML's mode; the
+run-summary entity. Must be robust to agents naming plans arbitrarily (we
+cannot key on `paraboloid-optimize`). Also confirm the WAL-checkpoint story for
+read-only opens of a committed fixture DB.
+
+**Grading policy (the decision for sign-off).** Per metric:
+  1. Map `Metric.lane_a_module` (`analysis`/`optimization`) → the omd run
+     **mode**; find the agent's runs of that mode in `run_cases`/`activities`.
+  2. Grade the **last successful** run of the matching mode — the agent's
+     final answer-by-action. Deliberately NOT best-of-all-runs: max-over-runs
+     would reward spray-and-pray (τ-bench grades final state for the same
+     reason).
+  3. **No successful run of the required mode → that metric FAILs.** This is
+     the τ-bench "pass by doing nothing" guard made structural: a no-op run
+     cannot pass, with or without a forged report.
+  4. The fenced-JSON self-report is DEMOTED to a secondary **reporting
+     fidelity** signal: `parsed` (bool), `passed` (the old numeric compare,
+     kept), and `matches_effects` (the agent's reported numbers within tol of
+     what its own runs produced — honest self-reporting is a deployment-
+     relevant trait in its own right).
+  5. Record shape: top-level `passed` now means **effect-passed**;
+     `reporting: {parsed, passed, matches_effects}` is the new sub-record;
+     `completed` is redefined as "≥1 successful execute activity" (was:
+     "emitted parseable JSON").
+
+**Artifact.**
+```
+src/hangar/evals/oracle.py       # effect oracle: find the agent's runs in data_root,
+                                 #   select per policy, extract metric values
+src/hangar/evals/cases.py        # Metric: add the effect-source key mapping
+                                 #   (e.g. opt_x -> run_cases final key "x")
+src/hangar/evals/run.py          # run_cell: passed = effect score; reporting
+                                 #   sub-record (aggregate.py field names follow)
+tests/test_oracle.py             # ABC triple + policy tests (see Review)
+tests/fixtures/                  # a checkpointed analysis.db from a real passed run
+```
+The fixture is our own run OUTPUT, not a reference answer — Lane A stays
+computed-on-demand through the seam; nothing privileged lands in-tree that the
+Step-14 sandbox wouldn't already make unreachable.
+
+**Where / setup.** All in this repo. The oracle reads ONLY the run's
+`data_root` (already captured per seed) — no new the-hangar surface. Existing
+`results/run_data/*` dirs serve as dev fixtures; one minimal checkpointed DB
+gets committed under `tests/fixtures/`.
+
+**Git.** One commit, `feat: effect-based grading — grade omd side effects,
+demote the self-report (Step 11)`. User reviews/merges.
+
+**Organization.** `oracle.py` sits beside `scoring.py` with a clean split:
+`scoring.py` stays the pure comparator (Metric, tolerances, verdicts — reused
+unchanged by BOTH graders), `oracle.py` owns "what did the agent actually
+produce", and `run_cell` reconciles the two into the record. Zero driver
+changes — the step is 100% harness-neutral and benefits every current and
+future arm.
+
+**Review (acceptance = the ABC oracle self-test from §12).**
+  1. **Known-good passes:** the committed fixture (a real passed anchor run)
+     scores PASS through the effect oracle.
+  2. **Perturbed fails:** the same fixture with one `run_cases` final value
+     nudged outside rtol scores FAIL.
+  3. **No-op cannot pass:** a fresh/empty `data_root` (no successful execute)
+     FAILs every required metric — even with a forged "correct" fenced-JSON
+     report attached to the agent text.
+  4. **The seed-0 case now scores correctly:** replay an archived
+     correct-but-prose run (or a synthetic equivalent): effect `passed=True`,
+     `reporting.parsed=False`.
+  5. **Live smoke:** re-run the Step-10 anchor smoke — still PASSES, now
+     effect-graded, with `reporting.matches_effects=True`.
+
+**Non-goals.** No pass^k / manifest version-pinning (Step 12), no sandbox
+(Step 14), no new cases (Step 15), no prompt changes, no changes to the
+tool-trace or provenance metrics.
+
+**Risks.** (1) The mode discriminator may be ambiguous under exotic agent
+behavior (multiple plans, replans, study runs) — Task 1 pins it; residual
+ambiguity gets LOGGED into the record (`oracle_ambiguity` count), never
+silently resolved. (2) `opt_x`/`opt_y` were `required=False` because DV
+retrieval through the TOOL surface is unreliable — but `run_cases` stores x/y
+directly, so the effect oracle likely makes them reliably gradable. Decide at
+review whether they flip to required (recommend: required for the effect
+grader, WARN-only for reporting fidelity). (3) `run_cases` key naming may vary
+across omd examples (`paraboloid.f_xy` and `f_xy` are both present) — the
+Metric mapping names ONE canonical key per case and the fixture test guards it.
 
 ---
 
@@ -404,13 +654,14 @@ exact current tags before pulling.
       stdio/socket channel — else the agent reads the-hangar through omd's own
       files. Also audit: `ListMcpResourcesTool`/`ReadMcpResourceTool` are benign
       *only while* omd exposes no reference answers as MCP resources.
-- [ ] **Filesystem sandbox (future step).** Give each run a clean scratch
+- [~] **Filesystem sandbox (→ Step 14, spec §4b amended — container-per-run
+      DECIDED 2026-07-02).** Give each run a clean scratch
       workspace (no repo/answers reachable) and **relax** the interim filesystem
       blocklist in `_DISALLOWED_TOOLS` (`_INTERIM_FILESYSTEM_TOOLS`) so the agent
       may use Bash/Read/Write to help drive omd. Until then those tools stay
       blocked because the anchor's cwd *is* the-hangar repo (the answers).
-- [ ] CLI-track sandboxing (Bash allowed) — container per run? OpenHands is
-      container-based; OpenCode is not. (Folds into the filesystem-sandbox step.)
+- [x] CLI-track sandboxing (Bash allowed) — **RESOLVED 2026-07-02:
+      container-per-run on colima (Step 14)**; OpenHands (Step 16) shares it.
 - [ ] Quantization policy: pin one quant per model (Q4_K_M / MLX-4bit) for fair
       comparison; record in `models.yaml`.
 - [~] Seeds/temperature per cell. **Multi-seed landed (Step 9):** default **3**
@@ -461,7 +712,26 @@ on paraboloid T0) surfaced these. None block the harness; record before fixing.
       4 turns once. The first MLX leaderboard (qwen3.6 PASS-analysis/FAIL-opt,
       gemma4 no-report) is **indicative only** until multi-seed lands (§10).
 
-- [ ] **Live run progress / watchability (Step 12).** Today a run is BLIND
+- [x] **Effect-based grading — PROMOTED to Step 11, spec written (§4c,
+      2026-07-02; was ranked #2 after the sandbox).** The seed-0 finding: a
+      qwen3.6 run **computed the correct optimum** (x=6.667, f=−27.33) but emitted
+      prose instead of the required ```json block → scored NO REPORT on format
+      alone. A *correct analysis got zero credit*. Per the §12 prior-art survey
+      (SWE-bench/τ-bench/BikeBench all grade final state), the primary grader
+      should read **what the agent actually ran** — the omd run results /
+      provenance DB (`get_results`, the `analysis.db`) — and compare to the Lane-A
+      reference, with the fenced-JSON demoted to a *secondary* signal. **Scope
+      sketch:** add an oracle that pulls the agent's final/pinned omd run outputs
+      from `data_root/analysis.db` (already captured per run) and scores those
+      against `compute_refs`; keep `extract_report` as a secondary "did it also
+      self-report correctly" metric; reconcile the two in `run_cell`. **Oracle
+      self-test (ABC checklist):** a known-good run passes, a perturbed run fails,
+      and a no-op / "did nothing" run cannot pass (τ-bench's pass-by-doing-nothing
+      trap). Touches `scoring.py` + `run.py`; harness-neutral, benefits every arm.
+      This is the smaller, self-contained alternative to the sandbox if priorities
+      shift. **Spec it before building.**
+- [ ] **Live run progress / watchability (Step 17; was 13 pre-reorder).**
+      Today a run is BLIND
       mid-seed: `OpenCodeDriver` uses a blocking `subprocess.run(capture_output)`,
       so nothing prints until a seed finishes — and a qwen3.6 seed is ~13 min. We
       want to watch seeds complete + the in-flight seed's turns / tool-calls /
@@ -480,7 +750,7 @@ on paraboloid T0) surfaced these. None block the harness; record before fixing.
       carriage-return status line; throttle redraws. Verify it doesn't change the
       hang-avoidance contract (`stdin=DEVNULL`).
 
-      **Also part of Step 12 — results viewing + a USER-DRIVEN run handoff.**
+      **Also part of Step 17 — results viewing + a USER-DRIVEN run handoff.**
       Two gaps the agent-run-it model hides:
         * **View results, not raw JSON.** Today the output is three
           `results/*.json[l]` files the user has to read by hand. Need an
@@ -490,7 +760,7 @@ on paraboloid T0) surfaced these. None block the harness; record before fixing.
           Pairs with the (later) leaderboard.
         * **Hand the run to the user, with step-by-step instructions.** So far
           the *agent* launches every run, so the user has never experienced the
-          live UX firsthand. Step 12 should produce a short runbook (start a run,
+          live UX firsthand. Step 17 should produce a short runbook (start a run,
           watch progress, open the results, find a seed's trace) and have the
           **user drive a run themselves** and give feedback on what's missing.
           The agent-run path masks exactly the rough edges (blind waits, raw
@@ -600,6 +870,70 @@ on paraboloid T0) surfaced these. None block the harness; record before fixing.
       than growing `run.py` further — it already provides MCP + sandbox-reading
       scorers + native pass@k. Open question for a future step: migrate to Inspect
       AI now (before more harness code accretes) vs. after the anchor lands (§10).
+      **RESOLVED 2026-07-02: stay hand-rolled; adopt the patterns (see §12b).**
+
+---
+
+## 12b. External review findings (2026-07-02) — gaps vs prior-art practice
+
+A full-repo review (code + plan) against τ-bench / SWE-bench / BikeBench /
+Terminal-Bench / BFCL practice. The two big items already moved the ladder
+(grader flip → Step 11 §4c; container sandbox → Step 14 §4b). The rest, with
+dispositions:
+
+- [ ] **Harness × model are confounded in the matrix.** The anchor is (Claude
+      SDK × Opus) and the local arm is (OpenCode × Qwen) — "% of anchor" cannot
+      decompose model gap vs harness gap, and quietly credits the SDK's
+      scaffolding quality to the model. Terminal-Bench 2.0 standardized its
+      harness for exactly this reason; our premise (harness = treatment
+      variable) is fine, but then the matrix needs isolating cells. Fix
+      (→ Step 16): run the SAME local model through OpenCode AND OpenHands, and
+      add a **Claude-via-OpenCode** cell (OpenCode has a native Anthropic
+      provider) to split "frontier model ceiling" from "Claude-SDK harness
+      ceiling."
+- [ ] **pass^k missing from the aggregate** (→ Step 12). `aggregate.py` reports
+      mean pass-rate only. Report pass@1, pass@k AND pass^k together, per the
+      §12 survey's own recommendation (τ-bench: GPT-4o retail pass^1 much
+      higher than pass^8 ≈ 25% — reliability is the production metric).
+- [ ] **The run manifest doesn't pin the environment** (→ Step 12). `RunConfig`
+      records the matrix but not: the-hangar git SHA, omd version, OpenCode /
+      Ollama versions, model quant, or the anchor model — the live anchor run
+      recorded `claude-opus-4-8` arriving as the SDK **default**, which drifts
+      silently when the SDK updates. Pin the anchor model explicitly in
+      `configs/`; write versions into the manifest. SWE-bench-style scaffold
+      disclosure starts with pinning our own environment.
+- [ ] **Token counts are parsed then dropped** (→ Step 12, or fold into 17).
+      OpenCode `step_finish` carries tokens; `AgentResult`/telemetry never
+      surfaces them, though §7 lists tokens as an efficiency metric.
+- [ ] **The prompt gives away the workflow.** `cases.PREAMBLE` spells out the
+      required tool order (and the omd server's MCP `instructions` repeat it),
+      so "workflow adherence" currently measures instruction-following, not
+      discovery. Fine for T0; T2 (→ Step 15) should add a **no-hint variant**
+      to measure discoverability, and each driver should record whether its
+      harness surfaces MCP server `instructions` to the model at all — a
+      hidden harness variable.
+- [x] **Per-run workspace lives inside this repo** (`results/run_data/`, and
+      OpenCode's cwd is `--dir <data_root>`) — folded into the Step-14 threat
+      model as item (e); the container mount closes it structurally.
+- [~] **`recovered_errors` over-counts** — a later successful call to the same
+      tool may serve a different purpose than the failed one. Accepted as a
+      coarse SECONDARY signal; don't headline it in reports.
+- [x] **Inspect AI migration — RESOLVED: stay hand-rolled.** Its standardized-
+      scaffold model conflicts with the "harness under test" premise (already
+      rejected in §10 for driving agents); what remains attractive (pass^k
+      reducers, oracle self-tests, tolerance predicates) we adopt as
+      *patterns*, not a dependency. Revisit only if the matrix outgrows a
+      serial overnight run — local Ollama serializes model execution anyway,
+      so parallel cells buy little today.
+- **Framing note (for the eventual writeup).** With <10 tasks this is a
+      **diagnostic suite / case-study eval**, not a leaderboard benchmark —
+      frame it that way alongside the AIAA case studies. The novel, citeable
+      core is **T3**: trap/recovery tasks over real documented solver squawks
+      (silent-ignore DVs, even `num_y`, typo'd keys, fake convergence) — no
+      τ-bench/BikeBench analog tests failure-mode vigilance, and the closest
+      physics-solver benchmarks (§12) don't either. The `friction` field
+      doubles as a tool-ergonomics instrument for the-hangar itself — worth
+      reporting as its own output, not just eval overhead.
 
 ---
 

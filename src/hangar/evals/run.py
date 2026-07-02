@@ -1,10 +1,13 @@
 """Runner — the model × harness × task matrix, multi-seed, end to end.
 
-A *cell* is (case, harness, model); ``run_cell`` runs ONE seed of it — builds the
-prompt, drives the agent, scores it three ways (numeric vs Lane A, tool-use
-trace, provenance DB) — and returns one JSON record. Because a single local-model
-run is noise (Step 9), each cell is run N seeds and ``aggregate_cell`` reduces
-them to a pass-rate ``CellSummary``.
+A *cell* is (case, harness, model); ``run_cell`` runs ONE seed of it — builds
+the prompt, drives the agent, and grades it. The PRIMARY grade is
+**effect-based** (Step 11): the omd run outputs the agent actually produced
+(read from the run's provenance DB via ``oracle.py``) versus Lane A. The
+fenced-JSON self-report is a SECONDARY *reporting fidelity* signal, and the
+tool trace / provenance DB add tool-use and workflow metrics. Because a single
+local-model run is noise (Step 9), each cell is run N seeds and
+``aggregate_cell`` reduces them to a pass-rate ``CellSummary``.
 
 A whole run is described by a ``RunConfig``, which makes runs **scriptable and
 reproducible** two ways:
@@ -43,7 +46,19 @@ from hangar.evals.cases import CASES, Case, build_prompt
 from hangar.evals.drivers.base import MCPServerSpec
 from hangar.evals.drivers.claude_sdk import ClaudeAgentSDKDriver
 from hangar.evals.drivers.opencode import OpenCodeDriver
-from hangar.evals.scoring import compute_refs, extract_report, score_report
+from hangar.evals.oracle import (
+    effect_values,
+    oracle_ambiguity,
+    read_effect_runs,
+    report_matches_effects,
+)
+from hangar.evals.scoring import (
+    compute_refs,
+    extract_report,
+    for_reporting,
+    score_report,
+    score_values,
+)
 from hangar.evals.trace import parse_tool_trace, read_provenance
 
 # harness name -> (driver factory, default model). Claude's default model is the
@@ -111,18 +126,34 @@ def run_cell(
         build_prompt(case), mcp, data_root, model=model, max_turns=max_turns
     )
 
-    # Numeric correctness (None when the agent emitted no parseable report).
     refs = compute_refs(case.example, case.metrics)
+    db = data_root / "analysis.db"
+
+    # PRIMARY — effect-based (Step 11): grade the omd runs the agent actually
+    # produced. No successful run of a metric's mode -> that metric FAILs, so
+    # a no-op (or forged-report) run cannot pass.
+    runs = read_effect_runs(db) if db.exists() else []
+    effects = effect_values(case.metrics, runs)
+    effect_score = score_values(case.metrics, effects, refs)
+    completed = any(r.executed_ok for r in runs)
+
+    # SECONDARY — reporting fidelity: did it also SAY what it did?
     try:
         report = extract_report(result.final_text)
     except ValueError:
         report = None
-    score = score_report(case.metrics, report, refs) if report is not None else None
+    report_score = (
+        score_report(for_reporting(case.metrics), report, refs)
+        if report is not None else None
+    )
+    matches = (
+        report_matches_effects(case.metrics, report, effects)
+        if report is not None else None
+    )
 
     # Tool-use (harness trace) + workflow adherence (provenance DB).
     trace = result.tool_call_trace or []
     tool_metrics = parse_tool_trace(trace)
-    db = data_root / "analysis.db"
     prov = read_provenance(db) if db.exists() else None
 
     return {
@@ -130,9 +161,26 @@ def run_cell(
         "harness": harness,
         "model": model,
         "seed": seed,
-        "completed": report is not None,
-        "passed": (score.passed if score else False),
-        "scores": _scores_to_dicts(score),
+        # >=1 successful execute (Step 11; was: "emitted parseable JSON").
+        "completed": completed,
+        "passed": effect_score.passed,
+        "scores": _scores_to_dicts(effect_score),   # PRIMARY: effect-graded
+        "reporting": {
+            "parsed": report is not None,
+            "passed": (report_score.passed if report_score else None),
+            "matches_effects": matches,
+            "scores": _scores_to_dicts(report_score),
+        },
+        "oracle": {
+            "n_runs": len(runs),
+            "n_executed_ok": sum(r.executed_ok for r in runs),
+            "ambiguity": oracle_ambiguity(case.metrics, runs),
+            "runs": [
+                {"run_id": r.run_id, "mode": r.mode,
+                 "executed_ok": r.executed_ok, "assess_status": r.assess_status}
+                for r in runs
+            ],
+        },
         "tool_use": _tool_metrics_to_dict(tool_metrics),
         # Per-call trace, so the record shows WHICH tools ran, not just counts.
         "tool_trace": [
@@ -191,11 +239,14 @@ def _prov_to_dict(p) -> dict | None:
 def _print_summary(record: dict) -> None:
     t = record["telemetry"]
     cell = f"{record['case']} · {record['harness']}/{record['model']} · seed {record['seed']}"
-    verdict = "PASS" if record["passed"] else ("completed" if record["completed"] else "NO REPORT")
+    verdict = "PASS" if record["passed"] else ("FAIL" if record["completed"] else "NO RUN")
     tu = record["tool_use"]
+    rep = record.get("reporting") or {}
     print(f"  {cell}")
-    print(f"    result: {verdict}  | turns={t['num_turns']} "
+    print(f"    result: {verdict} (effect-graded) | turns={t['num_turns']} "
           f"wall={t['wall_clock_s']:.1f}s cost={t['cost_usd']}")
+    print(f"    report: parsed={rep.get('parsed')} passed={rep.get('passed')} "
+          f"matches_effects={rep.get('matches_effects')}")
     print(f"    tools : {tu['total_calls']} calls, valid {tu['valid_call_rate']:.0%}, "
           f"schema-err {tu['schema_errors']}, hallucinated {tu['hallucinated_calls']}, "
           f"recovered {tu['recovered_errors']}")
@@ -207,7 +258,8 @@ def _print_summary(record: dict) -> None:
 def _print_cell_summary(s: CellSummary) -> None:
     print(f"  ══ cell summary: {s.case} · {s.harness}/{s.model} ({s.n_seeds} seeds) ══")
     print(f"     pass-rate {s.n_passed}/{s.n_seeds} ({s.pass_rate:.0%})  |  "
-          f"completed {s.n_completed}/{s.n_seeds} ({s.completion_rate:.0%})")
+          f"ran-ok {s.n_completed}/{s.n_seeds} ({s.completion_rate:.0%})  |  "
+          f"report-parsed {s.n_report_parsed}/{s.n_seeds}")
     if s.per_metric_pass:
         parts = ", ".join(f"{k} {v}/{s.n_seeds}" for k, v in s.per_metric_pass.items())
         print(f"     per-metric PASS: {parts}")
