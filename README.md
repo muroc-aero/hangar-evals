@@ -56,3 +56,8 @@ this reads as a sibling rather than a foreign tree.
 uv pip install -e ".[dev]"
 python -c "import hangar.evals; print(hangar.evals.__version__)"
 ```
+
+Tests that need a the-hangar checkout are marked `requires_hangar` and skip
+automatically when `$HANGAR_REPO` doesn't resolve — that's what CI runs
+(`.github/workflows/ci.yml`). With the-hangar installed alongside, `pytest`
+runs the full suite.

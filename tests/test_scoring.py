@@ -41,6 +41,7 @@ def test_extract_report_no_block_raises():
 # --- compute_refs (real Lane A) -------------------------------------------
 
 
+@pytest.mark.requires_hangar
 def test_compute_refs_paraboloid():
     refs = compute_refs("paraboloid", PARABOLOID_METRICS)
     assert refs["analysis"]["f_xy"] == 39.0
@@ -50,6 +51,7 @@ def test_compute_refs_paraboloid():
 # --- score_report ---------------------------------------------------------
 
 
+@pytest.mark.requires_hangar
 def test_score_report_all_pass():
     refs = compute_refs("paraboloid", PARABOLOID_METRICS)
     report = {"metrics": {
@@ -63,6 +65,7 @@ def test_score_report_all_pass():
     assert res.n_pass == 3
 
 
+@pytest.mark.requires_hangar
 def test_score_report_required_metric_fails():
     refs = compute_refs("paraboloid", PARABOLOID_METRICS)
     report = {"metrics": {
@@ -78,6 +81,7 @@ def test_score_report_required_metric_fails():
     assert verdicts["opt_x"] == "WARN"  # optional + missing
 
 
+@pytest.mark.requires_hangar
 def test_optional_missing_does_not_fail_overall():
     refs = compute_refs("paraboloid", PARABOLOID_METRICS)
     report = {"metrics": {
@@ -88,6 +92,7 @@ def test_optional_missing_does_not_fail_overall():
     assert res.passed  # opt_x optional+missing -> WARN only
 
 
+@pytest.mark.requires_hangar
 def test_bool_is_not_a_valid_numeric_metric():
     refs = compute_refs("paraboloid", PARABOLOID_METRICS)
     report = {"metrics": {"analysis_f_xy": True, "opt_f_xy": refs["optimization"]["f_xy"]}}

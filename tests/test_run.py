@@ -64,6 +64,7 @@ def _correct_report():
     )
 
 
+@pytest.mark.requires_hangar
 def test_run_cell_effects_pass_even_without_report(tmp_path):
     # The seed-0 injustice, fixed: the agent RAN the right analyses (fixture DB)
     # but emitted prose instead of the fenced JSON -> effect-PASS, report-unparsed.
@@ -88,6 +89,7 @@ def test_run_cell_effects_pass_even_without_report(tmp_path):
     assert "Paraboloid" in driver.seen_prompt
 
 
+@pytest.mark.requires_hangar
 def test_run_cell_report_alone_cannot_pass(tmp_path):
     # The tau-bench forged-report guard: a CORRECT fenced-JSON report with no
     # omd runs behind it scores zero — there is nothing to grade.
@@ -106,6 +108,7 @@ def test_run_cell_report_alone_cannot_pass(tmp_path):
     assert rec["oracle"]["n_runs"] == 0
 
 
+@pytest.mark.requires_hangar
 def test_run_cell_consistent_report_matches_effects(tmp_path):
     (tmp_path / "run_data").mkdir()
     driver = _FakeDriver(_correct_report(), db_fixture=FIXTURE_DB)
@@ -118,6 +121,7 @@ def test_run_cell_consistent_report_matches_effects(tmp_path):
     assert rec["reporting"]["matches_effects"] is True
 
 
+@pytest.mark.requires_hangar
 def test_run_cell_no_report_no_runs_is_incomplete(tmp_path):
     (tmp_path / "run_data").mkdir()
     driver = _FakeDriver("the model rambled but emitted no fenced json")
@@ -132,6 +136,7 @@ def test_run_cell_no_report_no_runs_is_incomplete(tmp_path):
                                 "matches_effects": None, "scores": None}
 
 
+@pytest.mark.requires_hangar
 def test_build_prompt_is_harness_neutral():
     prompt = build_prompt(CASES["paraboloid"])
     assert "mcp__omd__" not in prompt   # no Claude-specific tool namespace

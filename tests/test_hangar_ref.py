@@ -19,11 +19,13 @@ from hangar.evals.hangar_ref import (
 )
 
 
+@pytest.mark.requires_hangar
 def test_resolve_hangar_repo_points_at_the_hangar():
     repo = resolve_hangar_repo()
     assert (repo / EXAMPLES_SUBDIR).is_dir()
 
 
+@pytest.mark.requires_hangar
 def test_paraboloid_analysis_reference_is_39():
     ref = lane_a_reference("paraboloid", "analysis")
     assert ref["f_xy"] == 39.0
