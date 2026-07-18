@@ -38,6 +38,7 @@ import argparse
 import json
 import sys
 import tempfile
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,7 @@ from hangar.evals.drivers.base import MCPServerSpec
 from hangar.evals.drivers.claude_sdk import ClaudeAgentSDKDriver
 from hangar.evals.drivers.opencode import OpenCodeDriver
 from hangar.evals.environment import capture_environment
+from hangar.evals.omd_service import OmdHttpService
 from hangar.evals.oracle import (
     effect_values,
     oracle_ambiguity,
@@ -73,7 +75,8 @@ HARNESSES = {
     "opencode": (OpenCodeDriver, "qwen3:8b"),
 }
 
-_CONFIG_KEYS = ("case", "harnesses", "model", "seeds", "max_turns", "results_dir")
+_CONFIG_KEYS = ("case", "harnesses", "model", "seeds", "max_turns", "results_dir",
+                "omd_transport")
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,10 @@ class RunConfig:
     ``model`` overrides every harness's default when set. Round-trips to/from a
     JSON config file so a run can be reproduced by ``--config <manifest>`` or
     rebuilt in a Python script (modulo the not-yet-reproducible random seed).
+
+    ``omd_transport`` picks how the agent reaches omd: ``"stdio"`` (default —
+    the harness spawns it as a child) or ``"http"`` (Step 13 — a host-side
+    ``OmdHttpService`` per seed, the sandbox-ready channel).
     """
 
     case: str = "paraboloid"
@@ -91,6 +98,12 @@ class RunConfig:
     seeds: int = 3
     max_turns: int = 80
     results_dir: str = "results"
+    omd_transport: str = "stdio"
+
+    def __post_init__(self):
+        if self.omd_transport not in ("stdio", "http"):
+            raise ValueError(
+                f"omd_transport must be 'stdio' or 'http', got {self.omd_transport!r}")
 
     def to_dict(self) -> dict:
         d = {k: getattr(self, k) for k in _CONFIG_KEYS}
@@ -126,16 +139,23 @@ def run_cell(
     seed: int,
     results_dir: Path,
     max_turns: int = 80,
+    omd_transport: str = "stdio",
 ) -> dict:
     """Run one cell and return its result record."""
     data_root = Path(tempfile.mkdtemp(
         prefix=f"{case.name}_{harness}_s{seed}_", dir=str(results_dir / "run_data")
     )).resolve()
-    mcp = MCPServerSpec.omd(data_root)
 
-    result = driver.run(
-        build_prompt(case), mcp, data_root, model=model, max_turns=max_turns
-    )
+    # Either way omd's state lands under data_root, where the oracle reads it.
+    # http (Step 13): omd runs host-side for the seed's duration; the driver
+    # gets a url-only spec (no filesystem path crosses to the agent's config).
+    server = (OmdHttpService(data_root) if omd_transport == "http"
+              else nullcontext(MCPServerSpec.omd(data_root)))
+    with server as mcp:
+        result = driver.run(
+            build_prompt(case), mcp, data_root,
+            model=model, max_turns=max_turns,
+        )
 
     refs = compute_refs(case.example, case.metrics)
     db = data_root / "analysis.db"
@@ -205,6 +225,8 @@ def run_cell(
             # Normalized token counts; None when the harness reported none
             # (third-party drivers that never set it still work).
             "tokens": result.tokens,
+            # How the agent reached omd — parity runs are self-describing.
+            "omd_transport": omd_transport,
         },
         "data_root": str(data_root),
     }
@@ -258,9 +280,11 @@ def _print_summary(record: dict) -> None:
     rep = record.get("reporting") or {}
     tok = t.get("tokens") or {}
     tok_s = f" tokens={tok.get('input')}/{tok.get('output')}" if tok else ""
+    omd_s = (f" omd={t['omd_transport']}"
+             if t.get("omd_transport", "stdio") != "stdio" else "")
     print(f"  {cell}")
     print(f"    result: {verdict} (effect-graded) | turns={t['num_turns']} "
-          f"wall={t['wall_clock_s']:.1f}s cost={t['cost_usd']}{tok_s}")
+          f"wall={t['wall_clock_s']:.1f}s cost={t['cost_usd']}{tok_s}{omd_s}")
     print(f"    report: parsed={rep.get('parsed')} passed={rep.get('passed')} "
           f"matches_effects={rep.get('matches_effects')}")
     print(f"    tools : {tu['total_calls']} calls, valid {tu['valid_call_rate']:.0%}, "
@@ -331,7 +355,8 @@ def run_matrix(config: RunConfig, stamp: str) -> list[CellSummary]:
             cell_records: list[dict] = []
             for seed in range(config.seeds):
                 record = run_cell(case, driver, harness, model, seed,
-                                  results_dir, config.max_turns)
+                                  results_dir, config.max_turns,
+                                  omd_transport=config.omd_transport)
                 fh.write(json.dumps(record) + "\n")
                 fh.flush()
                 cell_records.append(record)

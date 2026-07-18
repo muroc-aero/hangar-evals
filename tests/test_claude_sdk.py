@@ -91,3 +91,34 @@ def test_run_captures_usage_and_num_turns(monkeypatch, tmp_path):
     assert result.cost_usd == 0.42
     assert result.num_turns == 7
     assert result.tokens == {"input": 100, "output": 25}
+
+
+# --- omd over HTTP (Step 13) ----------------------------------------------------
+
+
+def test_run_renders_http_mcp_server_url_only(monkeypatch, tmp_path):
+    # An http spec must reach the SDK as {"type": "http", "url": ...} — and
+    # nothing else: no path-bearing key crosses into the agent's config.
+    class _Result:
+        result = "ok"
+        total_cost_usd = 0.0
+        num_turns = 1
+        usage = None
+
+    fake = _fake_sdk(_Result())
+    seen = {}
+    inner_query = fake.query
+
+    async def query(prompt, options):
+        seen["options"] = options
+        async for message in inner_query(prompt, options):
+            yield message
+
+    fake.query = query
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", fake)
+
+    spec = MCPServerSpec.omd_http("http://127.0.0.1:8123/mcp")
+    ClaudeAgentSDKDriver().run(
+        "task", spec, tmp_path, model="claude-opus-4-8", cwd=tmp_path)
+    assert seen["options"].kwargs["mcp_servers"]["omd"] == {
+        "type": "http", "url": "http://127.0.0.1:8123/mcp"}

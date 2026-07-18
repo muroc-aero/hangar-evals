@@ -70,7 +70,7 @@ beyond are the post-ladder refinements.
 | **10** | **Wire the Claude anchor live** — the "% of anchor" ceiling; contamination guard on the anchor | `[anchor]` install, `configs/paraboloid_claude.json`, tightened `_DISALLOWED_TOOLS` + `setting_sources=[]`, `test_claude_sdk.py` | ✅ **DONE** |
 | **11** | **Effect-based grading + oracle self-test** — grade omd side effects (`run_cases`), demote the fenced-JSON self-report | `oracle.py` + `run.py` rewiring + ABC tests | ✅ **DONE** (spec §4c, PR #11) |
 | **12** | **Reporting rigor** — pass@1/pass@k/**pass^k** in the aggregate; pin environment versions in the manifest (incl. explicit anchor model); surface token counts | `aggregate.py`, `run.py` manifest, `environment.py` | ⏭ **IN PROGRESS (spec below §4d)** |
-| 13 | **omd-over-HTTP decoupling** — omd as a host-side HTTP service; parity test stdio↔HTTP (extracted from the old sandbox Task 1) | `MCPServerSpec` HTTP variant + `OmdHttpService` launcher + parity test | todo — after 12; **hard prereq for 14** (spec §4e) |
+| 13 | **omd-over-HTTP decoupling** — omd as a host-side HTTP service; parity test stdio↔HTTP (extracted from the old sandbox Task 1) | `MCPServerSpec` HTTP variant + `OmdHttpService` launcher + parity test | ⏭ **IMPLEMENTED 2026-07-17, awaiting review** (spec §4e); **hard prereq for 14** |
 | 14 | **Filesystem sandbox — container-per-run (colima)** — clean workspace OUTSIDE this repo; relax the interim tool blocklists (two commits: 14a OpenCode arm, 14b anchor) | container image + `drivers/sandbox.py` + isolation test | todo — after 13 (spec §4b, re-amended 2026-07-17) |
 | 15 | **Suite expansion** (T1 + T3 first) + per-case **task-validity** check (a scripted tool sequence reproduces Lane A) | new cases + scripted-baseline proofs | todo — after 14 |
 | 16 | **OpenHands arm + deconfounding cells** — same local model through both harnesses; a Claude-via-OpenCode cell to split model vs harness ceiling | `drivers/openhands.py` + configs | todo |
@@ -634,7 +634,22 @@ SDK version so any drift is diagnosable after the fact.
 
 ---
 
-## 4e. Step 13 spec — omd-over-HTTP decoupling (drafted 2026-07-17, awaiting sign-off)
+## 4e. Step 13 spec — omd-over-HTTP decoupling (IMPLEMENTED 2026-07-17, awaiting review/merge)
+
+> **Implemented 2026-07-17** (user green-lit the recommendations, so both
+> open decisions resolved as recommended: parity arm = anchor, one extended
+> `MCPServerSpec`). Live parity smoke: `paraboloid · claude/claude-opus-4-8 ·
+> seed 0` over HTTP → **PASS effect-graded, all 4 metrics**, matching the
+> Step-12 stdio baseline's verdicts (turns=46, wall=171.6s, cost=$1.372,
+> tokens=9712/12021, `omd=http` in the summary line; results at
+> `results/paraboloid_20260717T203443Z*`, manifest round-trips with
+> `omd_transport: "http"`). 91 tests pass incl. a real two-concurrent-server
+> lifecycle test. Risk (2) resolved: FastMCP serves **streamable HTTP** at
+> `/mcp` (`mcp.streamable_http_app()`), which is what the SDK's
+> `{"type": "http"}` speaks. Risk (1) (OpenCode remote-MCP shape) is
+> rendered per the documented `{"type": "remote", "url": ...}` form and
+> unit-tested, but not yet proven against a live OpenCode run — tracked as a
+> 14a verify item, exactly as the risk note planned.
 
 **Why now.** Pulled back from deferred by the Step-14 determination (§2 note,
 §4b Amendments 2): the sandbox container cannot host omd as a stdio child

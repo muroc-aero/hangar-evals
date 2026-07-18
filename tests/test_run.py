@@ -37,9 +37,11 @@ class _FakeDriver:
         self.trace = trace or []
         self.db_fixture = db_fixture
         self.seen_prompt = None
+        self.seen_mcp = None
 
     def run(self, prompt, mcp, data_root, model=None, max_turns=80):
         self.seen_prompt = prompt
+        self.seen_mcp = mcp
         if self.db_fixture is not None:
             shutil.copy(self.db_fixture, Path(data_root) / "analysis.db")
         return AgentResult(
@@ -177,6 +179,51 @@ def test_run_config_accepts_manifest_shape():
     assert RunConfig.from_dict(manifest) == cfg
 
 
+def test_run_config_omd_transport_round_trips_and_validates():
+    # Step 13: the transport is config, so parity runs are scriptable and the
+    # manifest self-describes how the agent reached omd.
+    cfg = RunConfig(case="paraboloid", harnesses=("claude",), seeds=1,
+                    omd_transport="http")
+    assert RunConfig.from_dict(json.loads(json.dumps(cfg.to_dict()))) == cfg
+    with pytest.raises(ValueError, match="omd_transport"):
+        RunConfig(omd_transport="carrier-pigeon")
+
+
+def test_run_cell_http_transport_uses_service_and_records_it(tmp_path, monkeypatch):
+    # The http branch hands the driver a url-only spec from OmdHttpService
+    # (faked here — the real lifecycle is test_omd_service.py's job) and the
+    # record's telemetry names the transport.
+    class _FakeService:
+        def __init__(self, data_root, host="127.0.0.1", startup_timeout_s=120.0):
+            self.data_root = data_root
+
+        def __enter__(self):
+            return run_mod.MCPServerSpec.omd_http("http://127.0.0.1:8123/mcp")
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(run_mod, "OmdHttpService", _FakeService)
+    (tmp_path / "run_data").mkdir()
+    driver = _FakeDriver("prose only", db_fixture=FIXTURE_DB)
+
+    rec = run_cell(CASES["paraboloid"], driver, "fake", "m0", 0, tmp_path,
+                   omd_transport="http")
+
+    assert driver.seen_mcp.transport == "http"
+    assert driver.seen_mcp.url == "http://127.0.0.1:8123/mcp"
+    assert rec["telemetry"]["omd_transport"] == "http"
+    assert rec["passed"] is True    # grading unchanged by the channel
+
+
+def test_run_cell_default_transport_is_stdio(tmp_path):
+    (tmp_path / "run_data").mkdir()
+    driver = _FakeDriver("prose", db_fixture=FIXTURE_DB)
+    rec = run_cell(CASES["paraboloid"], driver, "fake", "m0", 0, tmp_path)
+    assert driver.seen_mcp.transport == "stdio"
+    assert rec["telemetry"]["omd_transport"] == "stdio"
+
+
 def test_claude_anchor_model_is_pinned():
     # Decision 2 (spec §4d): "SDK default" must not be a reachable state — the
     # anchor model is a literal string, so records/manifests always name it.
@@ -203,7 +250,8 @@ def _fake_record(seed, *, passed):
 
 def test_run_matrix_writes_records_manifest_and_summary(monkeypatch, tmp_path):
     # seed 1 fails, seeds 0 and 2 pass -> 2/3 pass-rate, no driver/the-hangar.
-    def fake_run_cell(case, driver, harness, model, seed, results_dir, max_turns):
+    def fake_run_cell(case, driver, harness, model, seed, results_dir, max_turns,
+                      omd_transport="stdio"):
         return _fake_record(seed, passed=(seed != 1))
 
     monkeypatch.setattr(run_mod, "run_cell", fake_run_cell)
