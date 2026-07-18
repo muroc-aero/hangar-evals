@@ -68,11 +68,11 @@ beyond are the post-ladder refinements.
 | **8** | **Fix the dead `validated_before_execute` metric** (§12) — recompute from the tool trace; pin the activity vocabulary | `trace.py` + real-DB test | ✅ **DONE** |
 | **9** | **Multi-seed + scriptable runs** — N seeds/cell → pass-rate `CellSummary`; `RunConfig` (JSON config + manifest) | `aggregate.py`, `run.py` (`RunConfig`/`run_matrix`), `configs/` | ✅ **DONE** |
 | **10** | **Wire the Claude anchor live** — the "% of anchor" ceiling; contamination guard on the anchor | `[anchor]` install, `configs/paraboloid_claude.json`, tightened `_DISALLOWED_TOOLS` + `setting_sources=[]`, `test_claude_sdk.py` | ✅ **DONE** |
-| **11** | **Effect-based grading + oracle self-test** — grade omd side effects (`run_cases`), demote the fenced-JSON self-report | `oracle.py` + `run.py` rewiring + ABC tests | ⏭ **NEXT (spec below §4c)** |
-| 12 | **Reporting rigor** — pass@1/pass@k/**pass^k** in the aggregate; pin environment versions in the manifest (incl. explicit anchor model); surface token counts | `aggregate.py`, `run.py` manifest | todo |
-| 13 | **omd-over-HTTP decoupling** — omd as a host-side HTTP service; parity test stdio↔HTTP (extracted from the old sandbox Task 1) | `MCPServerSpec` HTTP variant + launcher + parity test | todo |
-| 14 | **Filesystem sandbox — container-per-run (colima)** — clean workspace OUTSIDE this repo; relax the interim tool blocklist | container image + `drivers/sandbox.py` + isolation test | todo (spec §4b, amended) |
-| 15 | **Suite expansion** (T1 + T3 first) + per-case **task-validity** check (a scripted tool sequence reproduces Lane A) | new cases + scripted-baseline proofs | todo |
+| **11** | **Effect-based grading + oracle self-test** — grade omd side effects (`run_cases`), demote the fenced-JSON self-report | `oracle.py` + `run.py` rewiring + ABC tests | ✅ **DONE** (spec §4c, PR #11) |
+| **12** | **Reporting rigor** — pass@1/pass@k/**pass^k** in the aggregate; pin environment versions in the manifest (incl. explicit anchor model); surface token counts | `aggregate.py`, `run.py` manifest, `environment.py` | ⏭ **IN PROGRESS (spec below §4d)** |
+| 13 | **omd-over-HTTP decoupling** — omd as a host-side HTTP service; parity test stdio↔HTTP (extracted from the old sandbox Task 1) | `MCPServerSpec` HTTP variant + `OmdHttpService` launcher + parity test | todo — after 12; **hard prereq for 14** (spec §4e) |
+| 14 | **Filesystem sandbox — container-per-run (colima)** — clean workspace OUTSIDE this repo; relax the interim tool blocklists (two commits: 14a OpenCode arm, 14b anchor) | container image + `drivers/sandbox.py` + isolation test | todo — after 13 (spec §4b, re-amended 2026-07-17) |
+| 15 | **Suite expansion** (T1 + T3 first) + per-case **task-validity** check (a scripted tool sequence reproduces Lane A) | new cases + scripted-baseline proofs | todo — after 14 |
 | 16 | **OpenHands arm + deconfounding cells** — same local model through both harnesses; a Claude-via-OpenCode cell to split model vs harness ceiling | `drivers/openhands.py` + configs | todo |
 | 17 | **Live run progress** — watch seeds/turns/tokens during a run (§12) | streaming driver + driver-agnostic progress callback | todo |
 
@@ -86,6 +86,26 @@ beyond are the post-ladder refinements.
 > containers anyway, and `sandbox-exec` is a quasi-deprecated detour. The
 > omd-over-HTTP work is the shared enabler either way, so it becomes its own
 > step (13).
+>
+> **Reordered again 2026-07-17**: execution order is now **12 → 14 → 15**
+> (rows above are in execution order; step numbers are stable IDs, kept so the
+> §4b/§4c/§4d spec headings and §12b cross-references stay valid). Sandboxing
+> moved ahead of suite expansion because "sandboxed runs" is a standing
+> requirement of the eval design, and every case added post-sandbox is born
+> with the relaxed-blocklist semantics rather than migrated to them. Step 13
+> (omd-over-HTTP) is deferred until a step concretely needs it — if the Step 14
+> container can't run omd in-container over stdio, 13 folds back in as its
+> prerequisite; otherwise OpenHands (16) decides.
+>
+> **Determination 2026-07-17 (Step-14 spec pass): it can't — 13 folds back in.**
+> Not for plumbing reasons but grading integrity: inside the container the
+> agent and a stdio-child omd share one privilege domain, so once Bash/Write
+> are relaxed, every file omd can write — including `analysis.db`, the
+> provenance DB that is the PRIMARY grading evidence since Step 11 — is
+> agent-writable, reopening the forged-evidence class the effect grader
+> exists to close. (It would also require the-hangar + the whole solver stack
+> inside the image, violating threat (a).) Execution order is therefore
+> **12 → 13 → 14 → 15**; Step 13 spec drafted at §4e, §4b re-amended.
 
 ---
 
@@ -211,7 +231,7 @@ goes green; flip `HANGAR_REPO` to a bad path and see a clear error.
 
 ---
 
-## 4b. Step 14 spec — filesystem sandbox, container-per-run (amended 2026-07-02)
+## 4b. Step 14 spec — filesystem sandbox, container-per-run (amended 2026-07-02, re-amended 2026-07-17)
 
 > **Amendments (2026-07-02 review):** (1) mechanism **DECIDED** — container-per-
 > run on colima (old Option B); `sandbox-exec` (old Option A) dropped. (2) The
@@ -219,6 +239,39 @@ goes green; flip `HANGAR_REPO` to a bad path and see a clear error.
 > shared enabler and independently testable. (3) Threat model gains item (e):
 > the per-run workspace itself must move OUT of this repo. (4) Renumbered
 > Step 11 → 14 after effect-based grading (§4c) was promoted ahead of it.
+>
+> **Amendments 2 (2026-07-17 spec pass — sign-off pending):**
+> (1) **In-container stdio omd rejected; Step 13 is a hard prerequisite** —
+> see the determination note in §2: a stdio-child omd shares the agent's
+> privilege domain, so relaxed Bash/Write makes the provenance DB (the
+> PRIMARY grading evidence, §4c) forgeable from inside the sandbox. omd runs
+> host-side over HTTP; its state lives under a host-only `data_root` that is
+> **never mounted** — the agent sees only a URL.
+> (2) **Workspace ≠ data_root.** The mounted per-run scratch workspace
+> (agent-writable, outside both repos) splits from `data_root` (host-only omd
+> state). Today they are the same directory (`run_cell` hands `data_root` to
+> both the driver and the oracle); after this step the driver gets
+> `(workspace, omd_url)` and the oracle keeps `data_root`. Threat (e) closes
+> structurally for the containerized arm.
+> (3) **Delivery in two commits.** **14a** — container infra + the OpenCode
+> arm: `containers/harness.Dockerfile` (node + pinned opencode), `sandbox.py`
+> (external workspace + `docker run` wrapper), OpenCode `tools` map relaxed
+> to workspace-scoped read/write/bash, isolation tests. **14b** — the Claude
+> anchor in-container: auth (macOS keychain creds don't exist in a linux
+> container — `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN` env, verify)
+> plus the in-container runner mechanism (thin standalone SDK runner script
+> with NO `hangar.evals` in the image, vs headless `claude -p
+> --output-format json`), and THEN `_INTERIM_FILESYSTEM_TOOLS` is relaxed —
+> that blocklist is the anchor's, so it falls in 14b, matching the coupling
+> documented in `test_interim_filesystem_tools_blocked_while_cwd_is_the_repo`.
+> (4) **Recon 2026-07-17:** colima 0.10.3 installed (not running — start it
+> before live tests); omd `--transport http` + auth-off-by-default confirmed
+> (§4e enablers). Container→host reachability is the top open risk: both
+> Ollama (default bind 127.0.0.1:11434) and the per-run omd service must be
+> reachable from the colima VM (`host.docker.internal` /
+> `--add-host=host.docker.internal:host-gateway`, fallback the lima gateway
+> IP; may force `OLLAMA_HOST`/`OMD_HOST` to a non-loopback bind — if so,
+> note the unauthenticated-on-LAN exposure and keep ports ephemeral).
 
 **Purpose.** Give each run a clean, isolated filesystem so the agent can be handed
 rich Bash/Read/Write tools *without* test-set contamination — then **relax the
@@ -326,13 +379,23 @@ User reviews/merges.
 
 **Open decisions for sign-off.**
   * ~~Mechanism~~ — **RESOLVED (2026-07-02): (B) container-per-run on colima.**
-  * ~~omd transport~~ — **moved to Step 13** (its own step + stdio↔HTTP parity test).
-  * **Scope:** relax the blocklist in *this* commit (recommended — it's the point)
-    or in a follow-up once isolation is proven?
+  * ~~omd transport~~ — **RESOLVED (2026-07-17): host-side over HTTP; Step 13
+    is a hard prerequisite** (see Amendments 2 and the §2 determination note).
+  * ~~Blocklist scope~~ — **RESOLVED (2026-07-17): per-arm, in the commit that
+    sandboxes that arm** — OpenCode `tools` map in 14a, the anchor's
+    `_INTERIM_FILESYSTEM_TOOLS` in 14b (relaxing a blocklist before its arm
+    is contained would open the very hole the sandbox exists to close).
+  * **14a/14b split** (Amendment 2.3): two reviewable commits (recommended)
+    vs one big one?
+  * **14b anchor mechanism:** standalone SDK runner script inside the image
+    (keeps the current driver/telemetry shape; NO `hangar.evals` in the
+    image) vs headless `claude -p --output-format json` (no python in the
+    image, but a driver rewrite). Decide at 14b sign-off — 14a doesn't
+    depend on it.
 
 ---
 
-## 4c. Step 11 spec — effect-based grading + oracle self-test (NEXT, for review)
+## 4c. Step 11 spec — effect-based grading + oracle self-test (✅ DONE, PR #11)
 
 **Purpose.** Flip the PRIMARY grader from the agent's fenced-JSON self-report to
 the **side effects of what the agent actually ran** — the omd run outputs
@@ -442,6 +505,219 @@ review whether they flip to required (recommend: required for the effect
 grader, WARN-only for reporting fidelity). (3) `run_cases` key naming may vary
 across omd examples (`paraboloid.f_xy` and `f_xy` are both present) — the
 Metric mapping names ONE canonical key per case and the fixture test guards it.
+
+---
+
+## 4d. Step 12 spec — reporting rigor: pass^k, environment pinning, tokens (IMPLEMENTED 2026-07-17, awaiting review/merge)
+
+**Purpose.** Make the numbers citeable. Three §12b findings, one step, no new
+capability under test — this is all about how results are *reported*:
+  1. **pass^k missing.** `aggregate.py` reports mean pass-rate only; the §12
+     survey's own guidance is pass@1, pass@k AND pass^k together (τ-bench:
+     GPT-4o retail pass^1 ≫ pass^8 ≈ 25% — reliability, not luck, is the
+     production metric). Must land before any multi-seed sweep we intend to
+     quote.
+  2. **The manifest doesn't pin the environment.** The live anchor run recorded
+     `claude-opus-4-8` arriving as the SDK *default* — it drifts silently when
+     the SDK updates, and nothing records the-hangar SHA, omd/OpenCode/Ollama
+     versions, or quant. SWE-bench-style scaffold disclosure starts with
+     pinning our own environment.
+  3. **Token counts are parsed then dropped.** OpenCode `step_finish` carries
+     them; the Claude `ResultMessage.usage` is never read — and `num_turns`
+     comes back `None` on anchor runs today (visible in the Step-11 smoke:
+     `turns=None`).
+
+**Current state (recon, 2026-07-02 — all confirmed in code).**
+  * `aggregate.py` — `pass_rate = n_passed/n` only; no tokens Stat.
+  * `run.py` — manifest is `{"stamp", "config"}`; **latent bug:** the module
+    docstring promises "re-run via `--config <manifest>`" but
+    `RunConfig.from_dict` rejects the wrapper keys (`stamp`, `config`) as
+    unknown — `--config` works only on bare config files today.
+  * `opencode.py` `parse_opencode_events` — reads `step_finish` `cost`,
+    ignores the sibling token fields.
+  * `claude_sdk.py` — `ResultMessage.num_turns` and `.usage` never captured;
+    `AgentResult.num_turns` left `None`.
+  * `HARNESSES["claude"]` default model is `None` → SDK default (the drift).
+
+**Decisions (for sign-off).**
+  1. **Estimators** (per cell: n seeds, c effect-passes; pure functions in
+     `aggregate.py`):
+       * pass@1 = c/n (unchanged headline `pass_rate`).
+       * pass@k = 1 − C(n−c, k)/C(n, k) — unbiased "≥1 of k passes"
+         (Chen et al. 2021).
+       * pass^k = C(c, k)/C(n, k) — unbiased "all k pass" (τ-bench).
+     Stored as curves `{k: value}` for k = 1..n in `CellSummary` (JSON keys are
+     strings — accepted). n is small (3–5), so the curves are coarse; raw
+     `n_passed/n_seeds` stays the headline and the curves are the trend signal.
+  2. **Pin the anchor model literally.** `HARNESSES["claude"]` default flips
+     `None` → `"claude-opus-4-8"`; `configs/paraboloid_claude.json` states it
+     explicitly. A model is now ALWAYS a string in records/manifests — "SDK
+     default" ceases to be a reachable state.
+  3. **Environment block** in the manifest, captured by a new
+     `environment.py` — **best-effort, never fatal** (a missing CLI records
+     `"unavailable"`, never crashes a run): hangar-evals git SHA + dirty flag,
+     the-hangar SHA + dirty (via `HANGAR_REPO`), python version, platform,
+     `claude-agent-sdk` version (importlib.metadata), `opencode --version`,
+     `ollama --version`. Written under `"environment"` in the manifest; NOT
+     part of `RunConfig` (it's observed, not configured — reproduction compares
+     it, doesn't replay it).
+  4. **Tokens.** `AgentResult` gains `tokens: dict | None`, normalized to
+     `{"input": int, "output": int, ...}` (extra provider keys pass through:
+     `reasoning`, `cache_read`, …). OpenCode: sum `step_finish` token fields
+     across steps. Claude: read `ResultMessage.usage` — and capture
+     `ResultMessage.num_turns` while there (fixes `turns=None`). Record:
+     `telemetry.tokens`; aggregate adds a `Stat` over output tokens (the
+     model-effort proxy least confounded by prompt caching).
+  5. **Manifest fix.** `--config` accepts BOTH shapes: a bare `RunConfig` JSON
+     and a run manifest (descend into `"config"` when present, ignore
+     `stamp`/`environment`) — making the docstring's promise true.
+
+**Artifact.**
+```
+src/hangar/evals/environment.py   # capture_environment() -> dict (best-effort)
+src/hangar/evals/aggregate.py     # pass_at_k / pass_pow_k curves + tokens Stat
+src/hangar/evals/run.py           # manifest env block; --config manifest fix;
+                                  #   telemetry.tokens; anchor model pin
+src/hangar/evals/drivers/base.py  # AgentResult.tokens
+src/hangar/evals/drivers/opencode.py   # sum step_finish tokens
+src/hangar/evals/drivers/claude_sdk.py # usage + num_turns from ResultMessage
+tests/test_aggregate.py           # estimator math + tokens Stat + back-compat
+tests/test_environment.py         # capture shape + never-fatal guarantee
+tests/test_opencode.py / test_claude_sdk.py / test_run.py  # token plumbing,
+                                  #   manifest round-trip via --config
+```
+
+**Where / setup.** All in this repo. Zero new dependencies —
+`importlib.metadata` + `subprocess` for git/CLI versions; `math.comb` for the
+estimators.
+
+**Git.** One commit, `feat: pass^k reporting, environment pinning, token
+telemetry (Step 12)`. User reviews/merges.
+
+**Organization.** Estimators are pure functions in `aggregate.py` beside
+`Stat` (testable without records, reusable by the report layer).
+`environment.py` is its own module so `run.py` stays orchestration and the
+capture is testable offline. Driver changes are additive fields — no interface
+break; `run_cell` reads `result.tokens` with a `None` fallback, so third-party
+drivers that never set it still work.
+
+**Review (acceptance).**
+  1. **Estimator math is exact:** unit tests against hand-computed
+     combinatorics — n=3, c=2 → pass@2 = 1.0, pass^2 = 1/3; c=0 → all zeros;
+     c=n → all ones; k > n rejected. Property: pass^k ≤ pass@1 ≤ pass@k.
+  2. **Manifest carries the environment** on a fake-driver `run_matrix`: git
+     SHAs present (running in this checkout), and `--config <manifest>`
+     reproduces the run (the round-trip test that today would fail).
+  3. **Tokens flow end-to-end:** OpenCode fixture JSONL → summed counts;
+     Claude driver captures `usage` + `num_turns` (mocked messages);
+     `telemetry.tokens` lands in the record.
+  4. **Backward compatible:** pre-Step-12 records (no `tokens`, no curves)
+     still aggregate cleanly (same tolerance pattern as `n_report_parsed`).
+  5. **Live smoke:** re-run the anchor cell — record shows
+     `model="claude-opus-4-8"` (explicit, not default), `turns` non-None,
+     tokens populated; manifest has the environment block.
+
+**Non-goals.** No new cases (Step 15), no sandbox (14), no omd-HTTP (13), no
+live token *streaming* (tokens land in the record; the live display is
+Step 17), no random-seed reproducibility (still out of scope), no cost
+modeling for local models (cost stays 0.0 there).
+
+**Risks.** (1) pass^k at n=3 is a coarse estimate — mitigated by keeping c/n
+as the headline and reporting curves as trend, not truth; bump seeds when a
+number matters. (2) CLI version-output formats drift (`opencode --version`,
+`ollama --version`) — capture is best-effort with `"unavailable"`, asserted
+never-fatal. (3) Local-model token semantics vary by provider (reasoning
+tokens, zeros vs missing) — normalize key names only, never invent values;
+`None` ≠ 0 in the record. (4) SDK `usage` field names may change across
+claude-agent-sdk versions — defensive `.get`, and the env block records the
+SDK version so any drift is diagnosable after the fact.
+
+---
+
+## 4e. Step 13 spec — omd-over-HTTP decoupling (drafted 2026-07-17, awaiting sign-off)
+
+**Why now.** Pulled back from deferred by the Step-14 determination (§2 note,
+§4b Amendments 2): the sandbox container cannot host omd as a stdio child
+without putting the provenance DB and the solver stack inside the agent's
+privilege domain. Host-side omd over HTTP is therefore a hard prerequisite for
+14 — this step builds and proves the channel while everything else stays as it
+is today (no container, no workspace move, no blocklist change). It is also
+independently useful: it removes the last reason any driver's cwd must be
+the-hangar.
+
+**Enablers (verified by 2026-07-17 recon).**
+  * The shared `run_server_main` (the-hangar `packages/sdk/.../server_main.py`)
+    already takes `--transport {stdio,http}`, `--host`, `--port` (omd default
+    8003) and serves MCP at `http://<host>:<port>/mcp`. No the-hangar changes
+    needed.
+  * Auth is **off unless** `OIDC_ISSUER_URL`/`KEYCLOAK_ISSUER_URL` is set
+    (`build_auth_settings()` returns `None`) — unauthenticated loopback works
+    out of the box; the loud stderr warning it prints is expected. The old
+    "auth/OIDC on loopback" risk is retired.
+  * Gotcha found: the server autostarts a range-safety dashboard thread on a
+    FIXED port 7655 (`_maybe_start_rs_dashboard`) — two concurrent per-run
+    servers would collide. The launcher must set `RS_DASHBOARD_AUTOSTART=off`.
+
+**Artifact.**
+```
+src/hangar/evals/drivers/base.py     # MCPServerSpec grows transport + url; MCPServerSpec.omd_http()
+src/hangar/evals/omd_service.py      # OmdHttpService: free port, launch, readiness wait, teardown
+src/hangar/evals/drivers/claude_sdk.py  # render http spec as {"type": "http", "url": ...}
+src/hangar/evals/drivers/opencode.py    # render http spec as OpenCode's remote-mcp entry (shape TBV)
+src/hangar/evals/run.py              # RunConfig.omd_transport ("stdio" default | "http"); run_cell branches
+tests/test_omd_service.py            # lifecycle tests + the stdio↔HTTP parity smoke (slow)
+```
+
+**Design.**
+  * `MCPServerSpec` stays one frozen dataclass: add `transport: str = "stdio"`
+    and `url: str | None = None`; `MCPServerSpec.omd_http(url)` carries no
+    command/args/env (the client side needs only the URL — that IS the
+    contamination property: no filesystem paths cross the channel). Drivers
+    branch on `transport`.
+  * `OmdHttpService(data_root)` (context manager): allocate a free port
+    (bind-0), launch `sys.executable -m hangar.omd.server --transport http
+    --host 127.0.0.1 --port N` with the same `OMD_*` env `MCPServerSpec.omd`
+    sets today plus `RS_DASHBOARD_AUTOSTART=off`, poll `/mcp` until ready
+    (bounded), yield the spec, and tear down SIGTERM→kill on exit — including
+    the failure path. `host` is a parameter so Step 14 can bind an interface
+    the colima VM reaches.
+  * `run_cell` keeps stdio as the default path; `omd_transport: "http"` in
+    `RunConfig` flips a cell, and the choice is recorded in the per-record
+    telemetry + manifest so parity runs are self-describing.
+
+**Acceptance.**
+  1. **Lifecycle (fast, no model):** service starts; `/mcp` responds; the
+     provenance DB initializes under `data_root`; teardown leaves no orphan;
+     two concurrent services get distinct ports and don't collide.
+  2. **Parity smoke (slow, live):** the paraboloid **anchor** cell over HTTP
+     is effect-graded PASS with the same per-metric verdicts as the Step-12
+     stdio smoke (`results/paraboloid_20260717T171527Z*`), and the record
+     names `omd_transport: "http"`.
+  3. **Contamination:** the rendered agent-side config contains the URL and
+     no `OMD_*` path, no `sys.executable`, no the-hangar path.
+
+**Non-goals.** No container (14a), no workspace move (14a), no blocklist
+change (14a/14b), no new cases (15). Stdio stays the default transport until
+Step 14 flips the containerized arm.
+
+**Risks.** (1) OpenCode's remote-MCP config shape is unverified (only the
+stdio form was proven, Step 4) — verify first; if OpenCode can't consume it
+cleanly, the anchor still proves the channel and the OpenCode side moves to
+14a. (2) FastMCP HTTP flavor (streamable-http vs SSE) vs what each harness
+speaks — pin at implementation. (3) Orphaned server if the runner dies hard —
+context-manager + best-effort `atexit`. (4) Readiness polling must bound
+startup (the solver-stack import is slow, tens of seconds first run).
+
+**Git.** One commit: `feat: omd as host-side HTTP service + stdio↔HTTP parity
+(Step 13)`. User reviews/merges.
+
+**Open decisions for sign-off.**
+  * **Parity arm:** anchor (recommended — a proven-PASS baseline exists from
+    the Step-12 smoke; one seed ≈ $1.35) vs OpenCode local (free, but
+    qwen3:8b passes are flaky, so "same verdicts" is a weaker signal).
+  * **MCPServerSpec shape:** extend the existing frozen dataclass
+    (recommended — one type flows through every seam) vs a separate
+    remote-spec class.
 
 ---
 
@@ -891,18 +1167,18 @@ dispositions:
       add a **Claude-via-OpenCode** cell (OpenCode has a native Anthropic
       provider) to split "frontier model ceiling" from "Claude-SDK harness
       ceiling."
-- [ ] **pass^k missing from the aggregate** (→ Step 12). `aggregate.py` reports
+- [ ] **pass^k missing from the aggregate** (→ Step 12, spec §4d). `aggregate.py` reports
       mean pass-rate only. Report pass@1, pass@k AND pass^k together, per the
       §12 survey's own recommendation (τ-bench: GPT-4o retail pass^1 much
       higher than pass^8 ≈ 25% — reliability is the production metric).
-- [ ] **The run manifest doesn't pin the environment** (→ Step 12). `RunConfig`
+- [ ] **The run manifest doesn't pin the environment** (→ Step 12, spec §4d). `RunConfig`
       records the matrix but not: the-hangar git SHA, omd version, OpenCode /
       Ollama versions, model quant, or the anchor model — the live anchor run
       recorded `claude-opus-4-8` arriving as the SDK **default**, which drifts
       silently when the SDK updates. Pin the anchor model explicitly in
       `configs/`; write versions into the manifest. SWE-bench-style scaffold
       disclosure starts with pinning our own environment.
-- [ ] **Token counts are parsed then dropped** (→ Step 12, or fold into 17).
+- [ ] **Token counts are parsed then dropped** (→ Step 12, spec §4d; live display folds into 17).
       OpenCode `step_finish` carries tokens; `AgentResult`/telemetry never
       surfaces them, though §7 lists tokens as an efficiency metric.
 - [ ] **The prompt gives away the workflow.** `cases.PREAMBLE` spells out the

@@ -120,6 +120,29 @@ def test_parse_events_report_trace_and_cost():
     assert run.tool_calls[0].ok is True
     assert run.cost_usd == 0.0
     assert run.num_turns == 1
+    assert run.tokens == {"output": 219}  # step_finish tokens now kept (Step 12)
+
+
+def test_parse_events_sums_tokens_across_steps():
+    # Multi-step run: per-key sums, nested cache dict flattened to cache_read/_write.
+    jsonl = "\n".join([
+        json.dumps({"type": "step_finish", "part": {
+            "tokens": {"input": 10, "output": 5, "reasoning": 0,
+                       "cache": {"read": 2, "write": 0}}, "cost": 0}}),
+        json.dumps({"type": "step_finish", "part": {
+            "tokens": {"input": 30, "output": 7, "cache": {"read": 1}}, "cost": 0}}),
+    ])
+    run = parse_opencode_events(jsonl, server="omd")
+    assert run.num_turns == 2
+    assert run.tokens == {"input": 40, "output": 12, "reasoning": 0,
+                          "cache_read": 3, "cache_write": 0}
+
+
+def test_parse_events_no_tokens_reported_is_none():
+    # None != 0: a stream whose steps carry no token fields yields None, so a
+    # provider that reports nothing is distinguishable from one reporting zero.
+    jsonl = json.dumps({"type": "step_finish", "part": {"cost": 0}})
+    assert parse_opencode_events(jsonl, server="omd").tokens is None
 
 
 def test_parse_events_schema_error_envelope_is_not_ok():
@@ -167,6 +190,7 @@ def test_run_writes_config_parses_events_and_closes_stdin(monkeypatch, tmp_path)
     assert [c.tool for c in result.tool_call_trace] == ["start_session"]
     assert result.cost_usd == 0.0
     assert result.num_turns == 1
+    assert result.tokens == {"output": 219}
     assert result.wall_clock_s is not None and result.wall_clock_s >= 0
 
     # Raw events persisted for debuggability.

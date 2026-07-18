@@ -47,6 +47,23 @@ _CONTAMINATION_TOOLS = ["Skill", "WebSearch", "WebFetch"]
 _DISALLOWED_TOOLS = _INTERIM_FILESYSTEM_TOOLS + _CONTAMINATION_TOOLS
 
 
+# SDK usage-key names -> the normalized token shape shared with OpenCode.
+_USAGE_KEY_MAP = {"input_tokens": "input", "output_tokens": "output"}
+
+
+def _normalize_usage(usage) -> dict | None:
+    """``ResultMessage.usage`` -> normalized ``{"input", "output", ...}``.
+
+    Defensive by design: usage field names may drift across claude-agent-sdk
+    versions (the manifest's environment block records the SDK version so drift
+    is diagnosable), so unknown keys pass through untouched and anything that
+    isn't a dict yields None (None != 0 in the record).
+    """
+    if not isinstance(usage, dict) or not usage:
+        return None
+    return {_USAGE_KEY_MAP.get(key, key): val for key, val in usage.items()}
+
+
 def _normalize_tool_name(name: str, server: str) -> str:
     """Strip the SDK's ``mcp__<server>__`` prefix to the bare tool name."""
     prefix = f"mcp__{server}__"
@@ -104,14 +121,16 @@ class ClaudeAgentSDKDriver:
     ) -> AgentResult:
         cwd = cwd or resolve_hangar_repo()
         start = time.monotonic()
-        final_text, cost, trace = asyncio.run(
+        final_text, cost, trace, num_turns, usage = asyncio.run(
             self._run_async(prompt, mcp, model, max_turns, cwd)
         )
         return AgentResult(
             final_text=final_text,
             cost_usd=cost,
             wall_clock_s=time.monotonic() - start,
+            num_turns=num_turns,
             tool_call_trace=trace,
+            tokens=_normalize_usage(usage),
         )
 
     async def _run_async(
@@ -121,7 +140,7 @@ class ClaudeAgentSDKDriver:
         model: str | None,
         max_turns: int,
         cwd: Path,
-    ) -> tuple[str, float | None, list[ToolCall]]:
+    ) -> tuple[str, float | None, list[ToolCall], int | None, dict | None]:
         try:
             from claude_agent_sdk import (
                 AssistantMessage,
@@ -163,6 +182,8 @@ class ClaudeAgentSDKDriver:
 
         final_text: str = ""
         cost: float | None = None
+        num_turns: int | None = None
+        usage: dict | None = None
         pending: dict[str, str] = {}   # tool_use_id -> bare tool name
         trace: list[ToolCall] = []
         async for message in query(prompt=prompt, options=options):
@@ -176,6 +197,8 @@ class ClaudeAgentSDKDriver:
                 if message.result:
                     final_text = message.result
                 cost = message.total_cost_usd
+                num_turns = getattr(message, "num_turns", None)
+                usage = getattr(message, "usage", None)
             else:
                 # Tool results arrive on the following (user) message's content.
                 for block in getattr(message, "content", None) or []:
@@ -185,4 +208,4 @@ class ClaudeAgentSDKDriver:
                             bool(getattr(block, "is_error", False)), block.content
                         )
                         trace.append(ToolCall(tool=tool, ok=ok, error_code=code))
-        return final_text, cost, trace
+        return final_text, cost, trace, num_turns, usage
