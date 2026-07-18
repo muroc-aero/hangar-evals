@@ -71,7 +71,7 @@ beyond are the post-ladder refinements.
 | **11** | **Effect-based grading + oracle self-test** — grade omd side effects (`run_cases`), demote the fenced-JSON self-report | `oracle.py` + `run.py` rewiring + ABC tests | ✅ **DONE** (spec §4c, PR #11) |
 | **12** | **Reporting rigor** — pass@1/pass@k/**pass^k** in the aggregate; pin environment versions in the manifest (incl. explicit anchor model); surface token counts | `aggregate.py`, `run.py` manifest, `environment.py` | ⏭ **IN PROGRESS (spec below §4d)** |
 | 13 | **omd-over-HTTP decoupling** — omd as a host-side HTTP service; parity test stdio↔HTTP (extracted from the old sandbox Task 1) | `MCPServerSpec` HTTP variant + `OmdHttpService` launcher + parity test | ⏭ **IMPLEMENTED 2026-07-17, awaiting review** (spec §4e); **hard prereq for 14** |
-| 14 | **Filesystem sandbox — container-per-run (colima)** — clean workspace OUTSIDE this repo; relax the interim tool blocklists (two commits: 14a OpenCode arm, 14b anchor) | container image + `drivers/sandbox.py` + isolation test | todo — after 13 (spec §4b, re-amended 2026-07-17) |
+| 14 | **Filesystem sandbox — container-per-run (colima)** — clean workspace OUTSIDE this repo; relax the interim tool blocklists (two commits: **14a anchor under local Claude Code auth**, **14b OpenCode/local-LLM arm**) | container image + `drivers/sandbox.py` + `drivers/claude_cli.py` + isolation test | **14a DONE 2026-07-18 (§4f, anchor-first per v1 goal); live smoke effect-graded PASS under local Claude Code auth (after the 421 Host-allowlist fix, spec item 5)**; 14b after (spec §4b) |
 | 15 | **Suite expansion** (T1 + T3 first) + per-case **task-validity** check (a scripted tool sequence reproduces Lane A) | new cases + scripted-baseline proofs | todo — after 14 |
 | 16 | **OpenHands arm + deconfounding cells** — same local model through both harnesses; a Claude-via-OpenCode cell to split model vs harness ceiling | `drivers/openhands.py` + configs | todo |
 | 17 | **Live run progress** — watch seeds/turns/tokens during a run (§12) | streaming driver + driver-agnostic progress callback | todo |
@@ -272,6 +272,16 @@ goes green; flip `HANGAR_REPO` to a bad path and see a clear error.
 > `--add-host=host.docker.internal:host-gateway`, fallback the lima gateway
 > IP; may force `OLLAMA_HOST`/`OMD_HOST` to a non-loopback bind — if so,
 > note the unauthenticated-on-LAN exposure and keep ports ephemeral).
+> (5) **14a detailed spec: §4f (2026-07-18).** The recon-item-4 networking
+> risk is RETIRED — live probes showed `host.docker.internal` forwards to the
+> host loopback on the installed colima; loopback binds stay, no LAN exposure.
+> (6) **Goal alignment 2026-07-18 — ARM ORDER SWAPPED (user direction):** the
+> first version must run the Lane C examples sandboxed under LOCAL CLAUDE CODE
+> AUTH, local LLMs after. So **14a = anchor in-container** (auth via
+> `claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`; mechanism DECIDED:
+> headless `claude -p` stream-json, see §4f), **14b = OpenCode arm** (tools
+> map + Ollama-over-`host.docker.internal`). `_INTERIM_FILESYSTEM_TOOLS`
+> relaxes in 14a now (it is the anchor's list); OpenCode's map in 14b.
 
 **Purpose.** Give each run a clean, isolated filesystem so the agent can be handed
 rich Bash/Read/Write tools *without* test-set contamination — then **relax the
@@ -733,6 +743,193 @@ startup (the solver-stack import is slow, tens of seconds first run).
   * **MCPServerSpec shape:** extend the existing frozen dataclass
     (recommended — one type flows through every seam) vs a separate
     remote-spec class.
+
+---
+
+## 4f. Step 14a spec — container sandbox: infra + the Claude-anchor arm, local Claude Code auth (DONE 2026-07-18; live smoke PASS after the 421 allowlist fix)
+
+> **Implemented results (2026-07-18).** 107/107 tests pass, including the live
+> proofs: **isolation** (the-hangar + this repo's `results/` unreachable
+> in-container; workspace mount real and writable), **channel** (container →
+> advertised omd `/mcp` URL answers via node fetch), **image** (in-container
+> CLI reports the 2.1.212 pin; warm container start ≈ 0.1–0.2 s on colima/vz,
+> negligible vs a multi-minute agent run). A field lesson landed in the tests
+> themselves: the isolation test first used pytest's `tmp_path` (=
+> `/var/folders/...`) and hit the silent-empty-mount failure mode exactly as
+> recon predicted — live tests now use `make_workspace()`.
+>
+> **Live smoke (2026-07-18, after the token arrived): acceptance item 3
+> PASSED.** First attempt failed NO-RUN with a clean diagnosis: every
+> in-container request 421'd on FastMCP's DNS-rebinding Host allowlist (spec
+> item 5's amendment — auth, sandbox, parsing, and the agent itself all
+> behaved; the server just never accepted the advertised name). After the
+> two-sided allowlist fix: **effect-graded PASS**, all four metrics exact
+> (`analysis_f_xy` 39, `opt_f_xy` −27.3333, `opt_x` 6.66667, `opt_y`
+> −7.33333) — the same verdicts as the stdio (Step 12) and http (Step 13)
+> baselines, i.e. §4b acceptance items 3+4 in one run. 47 turns, 201 s wall,
+> 46 tool calls at 100% valid / 0 hallucinated, report `matches_effects=True`.
+> Risk 1 (virtiofs file ownership under `USER node`) and risk 2 (headless
+> OAuth in a clean container) are both retired by the same run.
+
+> **Re-scope 2026-07-18 (goal alignment; supersedes the same-day OpenCode-first
+> draft).** The first-version target is **the-hangar's Lane C examples running
+> sandboxed under LOCAL CLAUDE CODE AUTH** (the user's subscription OAuth, not
+> an API key), extending to local LLMs after. So the arm order **swaps**:
+> **14a = container infra + the Claude anchor in-container** (was 14b);
+> **14b = the OpenCode / local-LLM arm** (its tools-map relaxation moves there
+> with it). The §4b open decision "14b anchor mechanism" is decided here:
+> **headless `claude -p --output-format stream-json`** — node-only image, no
+> python inside, and stream-json is exactly the protocol the claude-agent-sdk
+> wraps, so the driver keeps the same trace/telemetry shape as the SDK driver.
+> Verified on the host CLI **2.1.212** (the image pin): `--mcp-config` +
+> `--strict-mcp-config`, `--setting-sources`, `--disallowed-tools`,
+> `--permission-mode`, `--output-format stream-json` (requires `--verbose`),
+> and `--max-turns` (absent from `--help` on 2.1.212 but parsed — it is what
+> the SDK passes). Lane-C payload for Step 15 after this lands: the-hangar has
+> **13 examples** under `packages/omd/examples/` (`paraboloid`,
+> `pyc_turbojet`, `oas_*`, `ocp_*`, `evt_*`), each with
+> `lane_c/*_open.prompt.md`; `cases.py` already keys on example names, so the
+> suite extends without touching the sandbox.
+
+> **Recon 2026-07-18 (live: colima 0.10.3 / vz / virtiofs / docker client
+> 29.6.0) — §4b's top risk is RETIRED.** From inside a container,
+> `host.docker.internal` resolves with NO extra flags (`--add-host` not
+> needed) and forwards to the host **loopback**: a `127.0.0.1`-bound test
+> listener AND the real Ollama (`127.0.0.1:11434`) both answered 200. So omd
+> and Ollama keep their loopback binds — no `OLLAMA_HOST` change, no
+> unauthenticated-on-LAN exposure, ports stay ephemeral. Two new facts with
+> teeth: **(1) bind-mounts only see paths under colima's VM mounts** (default
+> config `mounts: []` = `$HOME` + `/tmp/colima`) — a dir under
+> `/var/folders/...` (python's default `mkdtemp`) mounts **silently empty**,
+> so the workspace root MUST live under `$HOME`. **(2) opencode 1.17.5
+> (matches brew) is a self-contained binary** — no runtime npm provider
+> install — but it caches the models.dev registry
+> (`~/.cache/opencode/models.json`); pre-warm that at image build so
+> containers don't fetch it (or hang offline) at run start.
+
+**Purpose.** First half of the §4b delivery, anchor-first: the container
+infrastructure plus the **Claude anchor running IN the container under the
+user's local Claude Code (subscription) auth**, with the anchor's
+`_INTERIM_FILESYSTEM_TOOLS` finally relaxed — inside the sandbox those tools
+only reach the scratch workspace, which is the payoff the interim blocklist
+was always waiting on. The OpenCode/local-LLM arm is untouched (14b).
+
+**Design.**
+  1. **Workspace ≠ data_root** (Amendment 2.2 — closes threat (e) for this
+     arm). When sandboxed, `run_cell` creates a per-seed **workspace** via
+     `mkdtemp` under `~/.cache/hangar-evals/workspaces/` (mountable, outside
+     both repos) and hands THAT to the driver; `data_root` stays under
+     `results/run_data/` (omd state + oracle evidence, host-only, **never
+     mounted**). The record gains a `"workspace"` field; driver debug
+     artifacts (`mcp_config.json`, `claude_events.jsonl`) land in the
+     workspace, retained like `run_data`.
+  2. **`drivers/sandbox.py`** — `make_workspace()` (root policy: MUST be
+     under `$HOME`, see recon fact 1 — unit-tested) +
+     `ContainerSandbox(image)` rendering `docker run --rm
+     -e CLAUDE_CODE_OAUTH_TOKEN -v <ws>:/workspace -w /workspace <image>
+     <inner argv>`. Only the workspace is mounted; the token crosses as an
+     env var whose VALUE never appears in argv; `--rm` per run.
+  3. **`containers/anchor.Dockerfile`** — `node:22-slim` + `npm install -g
+     @anthropic-ai/claude-code@2.1.212` (pinned == host CLI), `USER node`
+     (Claude Code refuses permission-bypass as root, and workspace files
+     shouldn't come back root-owned), tagged
+     `hangar-harness:anchor-2.1.212`. No python, no hangar code, no
+     `~/.claude` state — threat (d) closes structurally.
+  4. **`drivers/claude_cli.py` — `ClaudeCliDriver`** (new; the SDK driver
+     stays for unsandboxed host runs). Runs `claude -p <prompt>
+     --output-format stream-json --verbose --model <m> --max-turns <n>
+     --permission-mode bypassPermissions --setting-sources ""
+     --mcp-config /workspace/mcp_config.json --strict-mcp-config
+     --disallowed-tools Skill WebSearch WebFetch` inside the sandbox, parses
+     the stream-json events (assistant text / tool_use, user tool_result,
+     result telemetry) into the SAME `AgentResult` shape as the SDK driver —
+     reusing its `_classify_tool_result` / `_normalize_usage` /
+     `_normalize_tool_name`. Auth: fails fast with `claude setup-token`
+     guidance when `CLAUDE_CODE_OAUTH_TOKEN` is unset (macOS-keychain creds
+     don't exist in a linux container).
+  5. **`OmdHttpService` grows `advertise_host`** — binds and readiness-polls
+     `127.0.0.1` as today; the returned spec's URL uses the advertised host
+     (`host.docker.internal` when sandboxed). ~~Loopback recon says no other
+     change is needed.~~ **Falsified by the first live smoke (2026-07-18):**
+     reachability is not acceptance. FastMCP freezes a localhost-only
+     DNS-rebinding allowlist at construction, so every in-container request
+     421'd on its `Host: host.docker.internal` header and the MCP connect
+     hung at "pending" (the anchor burned 17 turns ToolSearch-ing for tools
+     that never appeared). Fix is two-sided: the-hangar's `server_main` gains
+     `HANGAR_MCP_EXTRA_ALLOWED_HOSTS` (comma-separated Host values, applied
+     before the session manager freezes; guard stays ON otherwise), and
+     `OmdHttpService` sets it to `{advertise_host}:*` for its child exactly
+     when advertising a non-bind name. Pinned host-side in the lifecycle test
+     (advertised name admitted on the advertising service, still 421 on the
+     non-advertising one) and in the tightened container channel test
+     (status != 421, not merely "answered").
+  6. **Blocklist relaxation, per-arm as decided (§4b):** the sandboxed CLI
+     driver passes ONLY `_CONTAMINATION_TOOLS` (Skill/WebSearch/WebFetch — a
+     filesystem sandbox can't stop those vectors); Bash/Read/Write/Edit/
+     Glob/Grep/NotebookEdit/Task are AVAILABLE, scoped to the container. The
+     host SDK driver keeps the full interim blocklist (its cwd is still the
+     the-hangar repo). OpenCode's all-False tools map is untouched until 14b.
+  7. **`RunConfig.sandbox: "none" | "container"`** (default `"none"`).
+     Validation: `"container"` requires `omd_transport == "http"` (the §2
+     determination — stdio omd in-container makes the grading evidence
+     forgeable) and, until 14b, `harnesses ⊆ {"claude"}` — opencode ×
+     container is a hard error. Records carry `sandbox` + the image tag;
+     `configs/paraboloid_claude_sandbox.json` scripts the smoke.
+
+**Acceptance (§4b's proof, scoped to this arm).**
+  1. **Isolation (live):** from inside the container, reading a known
+     the-hangar path (`packages/omd/examples/agent_eval/eval_lane_c.py`) and
+     this repo's `results/` FAILS (paths absent — nothing to traverse to);
+     a probe file in the workspace is readable/writable (also proves the
+     mount isn't silently empty, recon fact 1).
+  2. **Channels intact (live):** container → advertised omd `/mcp` URL
+     answers; the CLI inside the image reports its pinned version.
+  3. **Task unbroken (live smoke, needs the token):** sandboxed `paraboloid ×
+     claude/claude-opus-4-8 × 1 seed` is **effect-graded PASS** with the same
+     per-metric verdicts as the stdio (Step 12) and http (Step 13) baselines
+     — §4b acceptance items 3 + 4 in one run, since this run already has the
+     filesystem tools relaxed.
+  4. **Relaxed safely:** unit tests pin BOTH blocklists — the sandboxed CLI
+     argv blocks only Skill/Web* (Bash et al. absent), the host SDK path
+     still blocks the interim set — so neither can drift silently.
+  5. **Config contamination:** the rendered `mcp_config.json` + argv carry
+     container paths and `host.docker.internal` URLs only — no host
+     filesystem path, no `OMD_*`, no token value.
+
+**Non-goals.** No OpenCode/local-LLM sandboxing (14b — its image, tools-map
+relaxation, and Ollama-over-`host.docker.internal` wiring); no OpenHands (16);
+no new cases (15 — but nothing here blocks the Lane-C payload); no CI image
+publishing; no network isolation beyond the tool blocklist (the container
+legitimately needs omd; the anchor needs api.anthropic.com).
+
+**Risks.** (1) File ownership on virtiofs mounts (`USER node`, uid 1000, vs
+host uid) — verify at live test; fallback `--user` mapping. (2) Headless CLI
+auth wrinkles with an OAuth token in a clean container (no `~/.claude.json`
+onboarding state) — verify with a trivial `-p` call before the full smoke.
+(3) The silent-empty-mount class — workspace-root policy unit test + the
+live probe-file assert. (4) Image drift vs the host CLI — version pinned in
+the Dockerfile, recorded per-record. (5) stream-json event-shape drift
+across CLI versions — parser is tolerant (unknown event types skipped), pin
+recorded. (6) `--max-turns` is undocumented on 2.1.212 — verified parsed
+today; re-verify on version bumps.
+
+**Git.** One commit: `feat: container sandbox — external workspace + Claude
+anchor arm, local auth (Step 14a)`. User reviews/merges. (Prereqs: Steps
+12 + 13 merged.)
+
+**Open decisions.**
+  * ~~Anchor mechanism~~ — **RESOLVED (2026-07-18): headless CLI
+    stream-json** (node-only image; same protocol the SDK wraps; no python or
+    hangar code in the image). The SDK-runner-script option is dropped.
+  * ~~Arm order~~ — **RESOLVED (2026-07-18): anchor first** (user goal:
+    first version = Lane C examples, sandboxed, local Claude Code auth;
+    local LLMs extend after in 14b).
+  * Workspace root `~/.cache/hangar-evals/workspaces/`, knob shape
+    `"none"|"container"`, and the 14a/14b split carry over from the morning
+    draft as recommended.
+  * **User action required for acceptance item 3:** mint the token once with
+    `claude setup-token` and export `CLAUDE_CODE_OAUTH_TOKEN` (the live smoke
+    and the token-gated tests skip cleanly without it).
 
 ---
 

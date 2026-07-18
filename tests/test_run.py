@@ -42,6 +42,7 @@ class _FakeDriver:
     def run(self, prompt, mcp, data_root, model=None, max_turns=80):
         self.seen_prompt = prompt
         self.seen_mcp = mcp
+        self.seen_dir = Path(data_root)
         if self.db_fixture is not None:
             shutil.copy(self.db_fixture, Path(data_root) / "analysis.db")
         return AgentResult(
@@ -194,7 +195,8 @@ def test_run_cell_http_transport_uses_service_and_records_it(tmp_path, monkeypat
     # (faked here — the real lifecycle is test_omd_service.py's job) and the
     # record's telemetry names the transport.
     class _FakeService:
-        def __init__(self, data_root, host="127.0.0.1", startup_timeout_s=120.0):
+        def __init__(self, data_root, host="127.0.0.1", advertise_host=None,
+                     startup_timeout_s=120.0):
             self.data_root = data_root
 
         def __enter__(self):
@@ -224,6 +226,79 @@ def test_run_cell_default_transport_is_stdio(tmp_path):
     assert rec["telemetry"]["omd_transport"] == "stdio"
 
 
+def test_run_config_sandbox_round_trips_and_validates():
+    # Step 14a: the sandbox is config, and it structurally requires the http
+    # transport — stdio omd inside the container would make the grading
+    # evidence agent-writable.
+    cfg = RunConfig(case="paraboloid", harnesses=("claude",), seeds=1,
+                    omd_transport="http", sandbox="container")
+    assert RunConfig.from_dict(json.loads(json.dumps(cfg.to_dict()))) == cfg
+    with pytest.raises(ValueError, match="sandbox"):
+        RunConfig(sandbox="chroot")
+    with pytest.raises(ValueError, match="omd_transport='http'"):
+        RunConfig(sandbox="container")   # default transport is stdio
+
+
+def test_run_cell_sandboxed_routes_driver_to_workspace(tmp_path, monkeypatch):
+    # The privilege split itself: the driver gets the external workspace, the
+    # oracle keeps data_root, and the omd spec advertises the container-facing
+    # host name.
+    seen = {}
+
+    class _FakeService:
+        def __init__(self, data_root, host="127.0.0.1", advertise_host=None,
+                     startup_timeout_s=120.0):
+            seen["advertise_host"] = advertise_host
+
+        def __enter__(self):
+            return run_mod.MCPServerSpec.omd_http(
+                "http://host.docker.internal:8123/mcp")
+
+        def __exit__(self, *exc):
+            return False
+
+    ws = tmp_path / "external_ws"
+    monkeypatch.setattr(run_mod, "OmdHttpService", _FakeService)
+    monkeypatch.setattr(run_mod, "make_workspace", lambda prefix: ws)
+    (tmp_path / "run_data").mkdir()
+    driver = _FakeDriver("prose only")
+
+    rec = run_cell(CASES["paraboloid"], driver, "fake", "m0", 0, tmp_path,
+                   omd_transport="http", sandbox="container")
+
+    assert seen["advertise_host"] == "host.docker.internal"
+    assert driver.seen_dir == ws                      # agent's world
+    assert Path(rec["data_root"]) != ws               # oracle's world
+    assert rec["workspace"] == str(ws)
+    assert rec["telemetry"]["sandbox"] == "container"
+
+
+def test_run_matrix_sandbox_is_anchor_only_until_14b(tmp_path):
+    cfg = RunConfig(case="paraboloid", harnesses=("opencode",), seeds=1,
+                    results_dir=str(tmp_path),
+                    omd_transport="http", sandbox="container")
+    with pytest.raises(ValueError, match="14b"):
+        run_matrix(cfg, stamp="20260718T000000Z")
+
+
+def test_run_matrix_sandboxed_claude_uses_cli_driver(tmp_path, monkeypatch):
+    from hangar.evals.drivers.claude_cli import ClaudeCliDriver
+
+    seen = {}
+
+    def fake_run_cell(case, driver, harness, model, seed, results_dir, max_turns,
+                      omd_transport="stdio", sandbox="none"):
+        seen["driver"] = driver
+        return _fake_record(seed, passed=True)
+
+    monkeypatch.setattr(run_mod, "run_cell", fake_run_cell)
+    cfg = RunConfig(case="paraboloid", harnesses=("claude",), seeds=1,
+                    results_dir=str(tmp_path),
+                    omd_transport="http", sandbox="container")
+    run_matrix(cfg, stamp="20260718T000000Z")
+    assert isinstance(seen["driver"], ClaudeCliDriver)
+
+
 def test_claude_anchor_model_is_pinned():
     # Decision 2 (spec §4d): "SDK default" must not be a reachable state — the
     # anchor model is a literal string, so records/manifests always name it.
@@ -251,7 +326,7 @@ def _fake_record(seed, *, passed):
 def test_run_matrix_writes_records_manifest_and_summary(monkeypatch, tmp_path):
     # seed 1 fails, seeds 0 and 2 pass -> 2/3 pass-rate, no driver/the-hangar.
     def fake_run_cell(case, driver, harness, model, seed, results_dir, max_turns,
-                      omd_transport="stdio"):
+                      omd_transport="stdio", sandbox="none"):
         return _fake_record(seed, passed=(seed != 1))
 
     monkeypatch.setattr(run_mod, "run_cell", fake_run_cell)
