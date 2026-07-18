@@ -47,16 +47,39 @@ def _http_alive(url: str) -> bool:
         return False
 
 
+def _http_status(url: str, host_header: str) -> int:
+    """Status code for a GET carrying an explicit Host header."""
+    req = urllib.request.Request(url, headers={"Host": host_header})
+    try:
+        with urllib.request.urlopen(req, timeout=2.0) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
 def test_service_lifecycle_two_concurrent(tmp_path):
     a_root, b_root = tmp_path / "a", tmp_path / "b"
+    # svc_b takes the sandbox path (Step 14a): the spec ADVERTISES the
+    # container-facing name while the bind (and readiness poll) stays loopback.
     svc_a = OmdHttpService(a_root)
-    svc_b = OmdHttpService(b_root)
+    svc_b = OmdHttpService(b_root, advertise_host="host.docker.internal")
     with svc_a as spec_a, svc_b as spec_b:
         # Distinct OS-assigned ports — no collision between concurrent seeds.
         assert spec_a.url != spec_b.url
         assert spec_a.transport == "http"
         assert spec_a.url.startswith("http://127.0.0.1:")
-        assert _http_alive(spec_a.url) and _http_alive(spec_b.url)
+        assert spec_b.url.startswith("http://host.docker.internal:")
+        # Aliveness is checked on the loopback poll URL — the advertised name
+        # only resolves inside a container.
+        assert _http_alive(spec_a.url) and _http_alive(svc_b._poll_url)
+        # The 421 lesson (first live smoke, 2026-07-18): reachability is NOT
+        # acceptance. FastMCP's DNS-rebinding guard 421s any Host header it
+        # wasn't told about, and the MCP client then hangs at "pending". The
+        # advertised name must be admitted on svc_b — while svc_a, which
+        # advertises nothing, must still reject it (the guard stays on).
+        port_b = svc_b._poll_url.rsplit(":", 1)[1].split("/")[0]
+        assert _http_status(svc_b._poll_url, f"host.docker.internal:{port_b}") != 421
+        assert _http_status(spec_a.url, "host.docker.internal:9999") == 421
         # State rooted host-side under each run's data_root (the oracle's
         # read path), created at server startup by init_analysis_db().
         assert (a_root / "analysis.db").exists()

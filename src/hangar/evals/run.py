@@ -46,8 +46,10 @@ from pathlib import Path
 from hangar.evals.aggregate import CellSummary, aggregate_cell
 from hangar.evals.cases import CASES, Case, build_prompt
 from hangar.evals.drivers.base import MCPServerSpec
+from hangar.evals.drivers.claude_cli import ClaudeCliDriver
 from hangar.evals.drivers.claude_sdk import ClaudeAgentSDKDriver
 from hangar.evals.drivers.opencode import OpenCodeDriver
+from hangar.evals.drivers.sandbox import make_workspace
 from hangar.evals.environment import capture_environment
 from hangar.evals.omd_service import OmdHttpService
 from hangar.evals.oracle import (
@@ -76,7 +78,7 @@ HARNESSES = {
 }
 
 _CONFIG_KEYS = ("case", "harnesses", "model", "seeds", "max_turns", "results_dir",
-                "omd_transport")
+                "omd_transport", "sandbox")
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,12 @@ class RunConfig:
     ``omd_transport`` picks how the agent reaches omd: ``"stdio"`` (default —
     the harness spawns it as a child) or ``"http"`` (Step 13 — a host-side
     ``OmdHttpService`` per seed, the sandbox-ready channel).
+
+    ``sandbox`` (Step 14a): ``"container"`` runs the agent in a colima/docker
+    container with ONLY a scratch workspace mounted. Requires
+    ``omd_transport="http"`` — a stdio omd child inside the container would
+    share the agent's privilege domain, making the provenance DB (the PRIMARY
+    grading evidence) forgeable.
     """
 
     case: str = "paraboloid"
@@ -99,11 +107,19 @@ class RunConfig:
     max_turns: int = 80
     results_dir: str = "results"
     omd_transport: str = "stdio"
+    sandbox: str = "none"
 
     def __post_init__(self):
         if self.omd_transport not in ("stdio", "http"):
             raise ValueError(
                 f"omd_transport must be 'stdio' or 'http', got {self.omd_transport!r}")
+        if self.sandbox not in ("none", "container"):
+            raise ValueError(
+                f"sandbox must be 'none' or 'container', got {self.sandbox!r}")
+        if self.sandbox == "container" and self.omd_transport != "http":
+            raise ValueError(
+                "sandbox='container' requires omd_transport='http': omd must run "
+                "host-side or the agent could forge the grading evidence")
 
     def to_dict(self) -> dict:
         d = {k: getattr(self, k) for k in _CONFIG_KEYS}
@@ -140,20 +156,33 @@ def run_cell(
     results_dir: Path,
     max_turns: int = 80,
     omd_transport: str = "stdio",
+    sandbox: str = "none",
 ) -> dict:
     """Run one cell and return its result record."""
     data_root = Path(tempfile.mkdtemp(
         prefix=f"{case.name}_{harness}_s{seed}_", dir=str(results_dir / "run_data")
     )).resolve()
 
+    # Sandboxed (Step 14a): the agent's world is a scratch workspace OUTSIDE
+    # both repos — the only path mounted into the container. data_root (omd
+    # state, the grading evidence) stays host-only and is never mounted.
+    sandboxed = sandbox == "container"
+    workspace = (make_workspace(f"{case.name}_{harness}_s{seed}")
+                 if sandboxed else None)
+
     # Either way omd's state lands under data_root, where the oracle reads it.
     # http (Step 13): omd runs host-side for the seed's duration; the driver
     # gets a url-only spec (no filesystem path crosses to the agent's config).
-    server = (OmdHttpService(data_root) if omd_transport == "http"
+    # Sandboxed, the spec advertises host.docker.internal (colima forwards it
+    # to the host loopback) while the bind stays loopback.
+    server = (OmdHttpService(
+                  data_root,
+                  advertise_host="host.docker.internal" if sandboxed else None)
+              if omd_transport == "http"
               else nullcontext(MCPServerSpec.omd(data_root)))
     with server as mcp:
         result = driver.run(
-            build_prompt(case), mcp, data_root,
+            build_prompt(case), mcp, workspace if sandboxed else data_root,
             model=model, max_turns=max_turns,
         )
 
@@ -227,8 +256,12 @@ def run_cell(
             "tokens": result.tokens,
             # How the agent reached omd — parity runs are self-describing.
             "omd_transport": omd_transport,
+            "sandbox": sandbox,
+            # Image drift stays visible: the exact container image, when any.
+            "sandbox_image": getattr(getattr(driver, "sandbox", None), "image", None),
         },
         "data_root": str(data_root),
+        "workspace": str(workspace) if workspace else None,
     }
 
 
@@ -282,6 +315,8 @@ def _print_summary(record: dict) -> None:
     tok_s = f" tokens={tok.get('input')}/{tok.get('output')}" if tok else ""
     omd_s = (f" omd={t['omd_transport']}"
              if t.get("omd_transport", "stdio") != "stdio" else "")
+    if t.get("sandbox", "none") != "none":
+        omd_s += f" sandbox={t['sandbox']}"
     print(f"  {cell}")
     print(f"    result: {verdict} (effect-graded) | turns={t['num_turns']} "
           f"wall={t['wall_clock_s']:.1f}s cost={t['cost_usd']}{tok_s}{omd_s}")
@@ -328,6 +363,12 @@ def run_matrix(config: RunConfig, stamp: str) -> list[CellSummary]:
         raise ValueError(f"unknown harness(es): {unknown}. choose from {list(HARNESSES)}")
     if config.case not in CASES:
         raise ValueError(f"unknown case: {config.case}. choose from {list(CASES)}")
+    if config.sandbox == "container":
+        unsupported = [h for h in config.harnesses if h != "claude"]
+        if unsupported:
+            raise ValueError(
+                f"sandbox='container' supports only the claude anchor for now "
+                f"(Step 14a); the {unsupported} arm lands in Step 14b")
 
     case = CASES[config.case]
     results_dir = Path(config.results_dir).resolve()
@@ -351,12 +392,16 @@ def run_matrix(config: RunConfig, stamp: str) -> list[CellSummary]:
         for harness in config.harnesses:
             factory, default_model = HARNESSES[harness]
             model = config.model or default_model
-            driver = factory()
+            # Sandboxed, the anchor swaps to the in-container CLI driver
+            # (Step 14a) — same AgentResult shape, different mechanism.
+            driver = (ClaudeCliDriver() if config.sandbox == "container"
+                      else factory())
             cell_records: list[dict] = []
             for seed in range(config.seeds):
                 record = run_cell(case, driver, harness, model, seed,
                                   results_dir, config.max_turns,
-                                  omd_transport=config.omd_transport)
+                                  omd_transport=config.omd_transport,
+                                  sandbox=config.sandbox)
                 fh.write(json.dumps(record) + "\n")
                 fh.flush()
                 cell_records.append(record)

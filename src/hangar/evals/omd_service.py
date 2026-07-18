@@ -41,25 +41,31 @@ def _free_port(host: str) -> int:
 class OmdHttpService:
     """``with OmdHttpService(data_root) as spec:`` — ``spec.url`` is live omd.
 
-    The server binds (and readiness-polls) ``host`` — loopback by default;
-    ``host`` is a parameter so Step 14 can bind an interface the colima VM
-    reaches. State lands under ``data_root`` via the same ``OMD_*`` env the
-    stdio spec uses, so the oracle reads ``analysis.db`` from the identical
-    place regardless of transport.
+    The server always binds (and readiness-polls) ``host`` — loopback. A
+    sandboxed run (Step 14a) passes ``advertise_host="host.docker.internal"``:
+    the SPEC's url uses that name, which colima resolves in-container and
+    forwards to the host loopback (verified live 2026-07-18), so the bind
+    never widens. State lands under ``data_root`` via the same ``OMD_*`` env
+    the stdio spec uses, so the oracle reads ``analysis.db`` from the
+    identical place regardless of transport.
     """
 
     def __init__(self, data_root: Path, host: str = "127.0.0.1",
+                 advertise_host: str | None = None,
                  startup_timeout_s: float = 120.0):
         self.data_root = Path(data_root).resolve()
         self.host = host
+        self.advertise_host = advertise_host or host
         self.startup_timeout_s = startup_timeout_s
         self.proc: subprocess.Popen | None = None
-        self.url: str | None = None
+        self.url: str | None = None         # what the agent connects to
+        self._poll_url: str | None = None   # host-side readiness endpoint
 
     def __enter__(self) -> MCPServerSpec:
         self.data_root.mkdir(parents=True, exist_ok=True)
         port = _free_port(self.host)
-        self.url = f"http://{self.host}:{port}/mcp"
+        self.url = f"http://{self.advertise_host}:{port}/mcp"
+        self._poll_url = f"http://{self.host}:{port}/mcp"
         env = {
             **os.environ,
             **MCPServerSpec.omd(self.data_root).env,
@@ -67,6 +73,11 @@ class OmdHttpService:
             # (7655): concurrent per-run services would collide on it.
             "RS_DASHBOARD_AUTOSTART": "off",
         }
+        if self.advertise_host != self.host:
+            # FastMCP's DNS-rebinding guard rejects Host headers other than
+            # the loopback bind with 421 — the advertised name must be
+            # admitted explicitly or in-container clients never connect.
+            env["HANGAR_MCP_EXTRA_ALLOWED_HOSTS"] = f"{self.advertise_host}:*"
         log = (self.data_root / "omd_server.log").open("w")
         try:
             # cwd=data_root: any cwd-relative default the server family has
@@ -95,7 +106,7 @@ class OmdHttpService:
                     f"startup; see {self.data_root / 'omd_server.log'}"
                 )
             try:
-                urllib.request.urlopen(self.url, timeout=1.0)
+                urllib.request.urlopen(self._poll_url, timeout=1.0)
                 return
             except urllib.error.HTTPError:
                 return  # any HTTP response means the transport is up
