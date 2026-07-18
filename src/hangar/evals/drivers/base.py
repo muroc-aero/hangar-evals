@@ -15,17 +15,20 @@ from typing import Protocol
 
 @dataclass(frozen=True)
 class MCPServerSpec:
-    """A stdio MCP server an agent connects to.
+    """An MCP server an agent connects to — stdio child or remote HTTP.
 
     Harness-neutral: the Claude SDK consumes the fields directly; the OpenCode
-    driver (later) renders them into ``opencode.json``. ``MCPServerSpec.omd``
-    builds the omd server wiring used across the suite.
+    driver renders them into ``opencode.json``. ``MCPServerSpec.omd`` builds
+    the stdio omd wiring used across the suite; ``MCPServerSpec.omd_http``
+    the client side of a host-run HTTP omd service (Step 13).
     """
 
     name: str
     command: str
     args: list[str]
     env: dict[str, str]
+    transport: str = "stdio"      # "stdio" | "http"
+    url: str | None = None        # set iff transport == "http"
 
     @classmethod
     def omd(cls, data_root: Path) -> "MCPServerSpec":
@@ -50,8 +53,26 @@ class MCPServerSpec:
                 "OMD_DB_PATH": str(data_root / "analysis.db"),
                 "OMD_PLAN_STORE": str(data_root / "plans"),
                 "OMD_RECORDINGS_DIR": str(data_root / "recordings"),
+                # sdk-level state (artifact/study stores, session provenance)
+                # defaults to ./hangar_data RELATIVE TO THE SERVER'S CWD —
+                # pin it under data_root so no run scatters state into
+                # whatever directory the server happened to start in.
+                "HANGAR_DATA_DIR": str(data_root / "hangar_data"),
             },
         )
+
+    @classmethod
+    def omd_http(cls, url: str) -> "MCPServerSpec":
+        """The client side of a HOST-run omd HTTP service (Step 13).
+
+        Carries ONLY the URL. That absence is the contamination property the
+        sandbox (Step 14) relies on: no filesystem path — the ``OMD_*`` roots,
+        ``sys.executable``, the-hangar — crosses the channel into the agent's
+        rendered config, and the server's state stays outside the agent's
+        privilege domain (see ``omd_service.OmdHttpService``).
+        """
+        return cls(name="omd", command="", args=[], env={},
+                   transport="http", url=url)
 
 
 @dataclass

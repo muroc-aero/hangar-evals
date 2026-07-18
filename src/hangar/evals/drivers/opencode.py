@@ -144,10 +144,20 @@ def render_opencode_config(
     The provider block wires an OpenAI-compatible local endpoint via
     ``@ai-sdk/openai-compatible``; ``tools: true`` flags the model as
     function-calling capable. The mcp block translates the harness-neutral
-    ``MCPServerSpec`` into OpenCode's schema (``type: "local"``, a single
-    ``command`` list, and ``environment``). ``tools`` disables OpenCode's
-    built-ins so only the omd MCP tools remain (the MCP-only track).
+    ``MCPServerSpec`` into OpenCode's schema — ``type: "local"`` (a single
+    ``command`` list plus ``environment``) for stdio, ``type: "remote"``
+    (url-only, Step 13) for a host-side HTTP omd service. ``tools`` disables
+    OpenCode's built-ins so only the omd MCP tools remain (the MCP-only track).
     """
+    if mcp.transport == "http":
+        mcp_entry = {"type": "remote", "enabled": True, "url": mcp.url}
+    else:
+        mcp_entry = {
+            "type": "local",
+            "enabled": True,
+            "command": [mcp.command, *mcp.args],
+            "environment": dict(mcp.env),
+        }
     return {
         "$schema": _CONFIG_SCHEMA,
         "provider": {
@@ -159,14 +169,7 @@ def render_opencode_config(
             },
         },
         "tools": {t: False for t in BUILTIN_TOOLS},
-        "mcp": {
-            mcp.name: {
-                "type": "local",
-                "enabled": True,
-                "command": [mcp.command, *mcp.args],
-                "environment": dict(mcp.env),
-            },
-        },
+        "mcp": {mcp.name: mcp_entry},
     }
 
 

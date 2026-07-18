@@ -64,6 +64,19 @@ def _normalize_usage(usage) -> dict | None:
     return {_USAGE_KEY_MAP.get(key, key): val for key, val in usage.items()}
 
 
+def _render_mcp_server(mcp: MCPServerSpec) -> dict:
+    """MCPServerSpec -> the SDK's mcp_servers entry.
+
+    The http form (Step 13) is url-only by construction — the streamable-HTTP
+    endpoint a host-side omd service exposes; no filesystem path reaches the
+    agent's config.
+    """
+    if mcp.transport == "http":
+        return {"type": "http", "url": mcp.url}
+    return {"type": "stdio", "command": mcp.command,
+            "args": mcp.args, "env": mcp.env}
+
+
 def _normalize_tool_name(name: str, server: str) -> str:
     """Strip the SDK's ``mcp__<server>__`` prefix to the bare tool name."""
     prefix = f"mcp__{server}__"
@@ -168,14 +181,7 @@ class ClaudeAgentSDKDriver:
             # sandbox would not stop — the harness injects them. The task comes
             # from the prompt alone.
             setting_sources=[],
-            mcp_servers={
-                mcp.name: {
-                    "type": "stdio",
-                    "command": mcp.command,
-                    "args": mcp.args,
-                    "env": mcp.env,
-                },
-            },
+            mcp_servers={mcp.name: _render_mcp_server(mcp)},
             allowed_tools=[f"mcp__{mcp.name}"],
             disallowed_tools=_DISALLOWED_TOOLS,
         )

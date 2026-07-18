@@ -78,6 +78,22 @@ def test_render_config_disables_builtin_tools(tmp_path):
     assert all(v is False for v in cfg["tools"].values())
 
 
+def test_render_config_remote_mcp_is_url_only():
+    # Step 13: an http MCPServerSpec renders as OpenCode's remote form —
+    # url only. No command/environment key, and the serialized config carries
+    # no filesystem path (the contamination property of the channel).
+    cfg = render_opencode_config(
+        MCPServerSpec.omd_http("http://127.0.0.1:8123/mcp"), "qwen3:8b")
+    omd = cfg["mcp"]["omd"]
+    assert omd == {"type": "remote", "enabled": True,
+                   "url": "http://127.0.0.1:8123/mcp"}
+    dumped = json.dumps(cfg)
+    assert "OMD_" not in dumped
+    assert sys.executable not in dumped
+    # Built-ins stay disabled regardless of transport.
+    assert all(v is False for v in cfg["tools"].values())
+
+
 def test_render_config_custom_provider_and_url(tmp_path):
     spec = MCPServerSpec.omd(tmp_path)
     cfg = render_opencode_config(
