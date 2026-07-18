@@ -25,7 +25,8 @@ Or the plain CLI flags:
     python -m hangar.evals.run --case paraboloid --harness opencode --seeds 3
 
 Each run writes three siblings in ``results/``: ``<case>_<stamp>.jsonl`` (per-seed
-records), ``<case>_<stamp>_config.json`` (the manifest — re-run via ``--config``),
+records), ``<case>_<stamp>_config.json`` (the manifest — re-run via ``--config``;
+it also pins the OBSERVED environment: git SHAs, tool/SDK versions, platform),
 and ``<case>_<stamp>_summary.json`` (the per-cell summaries). The random seed is
 NOT yet reproducible, but the *matrix* is. Scoring is held constant; only the
 driver/model vary — that's the whole point.
@@ -46,6 +47,7 @@ from hangar.evals.cases import CASES, Case, build_prompt
 from hangar.evals.drivers.base import MCPServerSpec
 from hangar.evals.drivers.claude_sdk import ClaudeAgentSDKDriver
 from hangar.evals.drivers.opencode import OpenCodeDriver
+from hangar.evals.environment import capture_environment
 from hangar.evals.oracle import (
     effect_values,
     oracle_ambiguity,
@@ -61,10 +63,13 @@ from hangar.evals.scoring import (
 )
 from hangar.evals.trace import parse_tool_trace, read_provenance
 
-# harness name -> (driver factory, default model). Claude's default model is the
-# SDK/CLI default (None); OpenCode floors to the pulled smoke model.
+# harness name -> (driver factory, default model). The Claude anchor is pinned
+# to a LITERAL model id (Step 12): a None default meant "whatever the SDK
+# defaults to today", which drifts silently across SDK updates — a model is now
+# always an explicit string in records and manifests. OpenCode floors to the
+# pulled smoke model.
 HARNESSES = {
-    "claude": (ClaudeAgentSDKDriver, None),
+    "claude": (ClaudeAgentSDKDriver, "claude-opus-4-8"),
     "opencode": (OpenCodeDriver, "qwen3:8b"),
 }
 
@@ -94,6 +99,12 @@ class RunConfig:
 
     @classmethod
     def from_dict(cls, d: dict) -> "RunConfig":
+        # Accept a run manifest ({"stamp", "environment", "config"}) as well as
+        # a bare config, so `--config <manifest>` really does reproduce a run
+        # (Step 12 fix — the wrapper keys used to be rejected as unknown).
+        # stamp/environment are observed outputs, not config — ignored.
+        if "config" in d:
+            d = d["config"]
         unknown = set(d) - set(_CONFIG_KEYS)
         if unknown:
             raise ValueError(f"RunConfig: unknown keys {sorted(unknown)}")
@@ -191,6 +202,9 @@ def run_cell(
             "wall_clock_s": result.wall_clock_s,
             "cost_usd": result.cost_usd,
             "num_turns": result.num_turns,
+            # Normalized token counts; None when the harness reported none
+            # (third-party drivers that never set it still work).
+            "tokens": result.tokens,
         },
         "data_root": str(data_root),
     }
@@ -242,9 +256,11 @@ def _print_summary(record: dict) -> None:
     verdict = "PASS" if record["passed"] else ("FAIL" if record["completed"] else "NO RUN")
     tu = record["tool_use"]
     rep = record.get("reporting") or {}
+    tok = t.get("tokens") or {}
+    tok_s = f" tokens={tok.get('input')}/{tok.get('output')}" if tok else ""
     print(f"  {cell}")
     print(f"    result: {verdict} (effect-graded) | turns={t['num_turns']} "
-          f"wall={t['wall_clock_s']:.1f}s cost={t['cost_usd']}")
+          f"wall={t['wall_clock_s']:.1f}s cost={t['cost_usd']}{tok_s}")
     print(f"    report: parsed={rep.get('parsed')} passed={rep.get('passed')} "
           f"matches_effects={rep.get('matches_effects')}")
     print(f"    tools : {tu['total_calls']} calls, valid {tu['valid_call_rate']:.0%}, "
@@ -271,6 +287,9 @@ def _print_cell_summary(s: CellSummary) -> None:
     if s.valid_call_rate:
         v = s.valid_call_rate
         print(f"     valid% min/med/max: {v.min:.0%} / {v.median:.0%} / {v.max:.0%}")
+    if s.output_tokens:
+        o = s.output_tokens
+        print(f"     out-tok min/med/max: {o.min:g} / {o.median:g} / {o.max:g}")
 
 
 def run_matrix(config: RunConfig, stamp: str) -> list[CellSummary]:
@@ -296,9 +315,12 @@ def run_matrix(config: RunConfig, stamp: str) -> list[CellSummary]:
     summary_path = results_dir / f"{base}_summary.json"
 
     # Manifest FIRST so the run is reproducible (via `--config <this file>`) even
-    # if it crashes partway. Records the exact matrix, modulo the random seed.
+    # if it crashes partway. Records the exact matrix, modulo the random seed —
+    # plus the OBSERVED environment (git SHAs, tool versions; Step 12), which
+    # reproduction compares rather than replays.
     manifest_path.write_text(json.dumps(
-        {"stamp": stamp, "config": config.to_dict()}, indent=2))
+        {"stamp": stamp, "environment": capture_environment(),
+         "config": config.to_dict()}, indent=2))
 
     summaries: list[CellSummary] = []
     with records_path.open("w") as fh:

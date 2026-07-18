@@ -49,12 +49,32 @@ class OpenCodeRun:
     tool_calls: list[ToolCall]
     cost_usd: float
     num_turns: int
+    tokens: dict | None  # summed over step_finish events; None if none carried any
 
 
 def _strip_server_prefix(tool: str, server: str) -> str:
     """``omd_start_session`` -> ``start_session`` (bare, harness-neutral name)."""
     prefix = f"{server}_"
     return tool[len(prefix):] if tool.startswith(prefix) else tool
+
+
+def _accumulate_tokens(acc: dict, tokens) -> None:
+    """Sum one ``step_finish`` token dict into ``acc``.
+
+    OpenCode's key names already match the normalized shape (``input``,
+    ``output``, ``reasoning``); nested dicts (``cache: {read, write}``) flatten
+    to ``cache_read`` / ``cache_write``. Non-numeric values are dropped, never
+    coerced.
+    """
+    if not isinstance(tokens, dict):
+        return
+    for key, val in tokens.items():
+        if isinstance(val, dict):
+            for sub, sv in val.items():
+                if isinstance(sv, (int, float)):
+                    acc[f"{key}_{sub}"] = acc.get(f"{key}_{sub}", 0) + sv
+        elif isinstance(val, (int, float)):
+            acc[key] = acc.get(key, 0) + val
 
 
 def parse_opencode_events(stdout: str, server: str) -> OpenCodeRun:
@@ -70,6 +90,7 @@ def parse_opencode_events(stdout: str, server: str) -> OpenCodeRun:
     calls: list[ToolCall] = []
     cost = 0.0
     turns = 0
+    token_sums: dict = {}
     for line in stdout.splitlines():
         line = line.strip()
         if not line:
@@ -94,7 +115,8 @@ def parse_opencode_events(stdout: str, server: str) -> OpenCodeRun:
         elif etype == "step_finish":
             turns += 1
             cost += part.get("cost") or 0.0
-    return OpenCodeRun("\n".join(text_parts), calls, cost, turns)
+            _accumulate_tokens(token_sums, part.get("tokens"))
+    return OpenCodeRun("\n".join(text_parts), calls, cost, turns, token_sums or None)
 
 
 # OpenCode's built-in tools. We disable ALL of them so the local agent is
@@ -200,6 +222,7 @@ class OpenCodeDriver:
             wall_clock_s=wall,
             num_turns=parsed.num_turns,
             tool_call_trace=parsed.tool_calls,
+            tokens=parsed.tokens,
         )
 
     def build_argv(self, prompt: str, data_root: Path, model: str) -> list[str]:

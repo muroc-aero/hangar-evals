@@ -48,6 +48,7 @@ class _FakeDriver:
             wall_clock_s=1.0,
             num_turns=3,
             tool_call_trace=self.trace,
+            tokens={"input": 1000, "output": 250},
         )
 
 
@@ -83,6 +84,8 @@ def test_run_cell_effects_pass_even_without_report(tmp_path):
     # Provenance metrics still read from the same DB.
     assert rec["provenance"]["n_activities"] > 0
     assert rec["tool_use"]["total_calls"] == 2
+    # Driver-reported tokens land in telemetry (Step 12).
+    assert rec["telemetry"]["tokens"] == {"input": 1000, "output": 250}
     # The agent got the real task prompt with the report format.
     assert "REPORT FORMAT" in driver.seen_prompt
     assert "Paraboloid" in driver.seen_prompt
@@ -164,6 +167,22 @@ def test_run_config_rejects_unknown_keys():
         RunConfig.from_dict({"case": "paraboloid", "temperature": 0.7})
 
 
+def test_run_config_accepts_manifest_shape():
+    # `--config <manifest>` (Step 12 fix): the wrapper keys stamp/environment
+    # are ignored and the config is read from the "config" key.
+    cfg = RunConfig(case="paraboloid", harnesses=("claude",), seeds=2)
+    manifest = {"stamp": "20260717T000000Z",
+                "environment": {"python": "3.12.0"},
+                "config": cfg.to_dict()}
+    assert RunConfig.from_dict(manifest) == cfg
+
+
+def test_claude_anchor_model_is_pinned():
+    # Decision 2 (spec §4d): "SDK default" must not be a reachable state — the
+    # anchor model is a literal string, so records/manifests always name it.
+    assert run_mod.HARNESSES["claude"][1] == "claude-opus-4-8"
+
+
 # --- run_matrix: multi-seed wiring + manifest (run_cell faked) ------------------
 
 
@@ -202,10 +221,16 @@ def test_run_matrix_writes_records_manifest_and_summary(monkeypatch, tmp_path):
     # Per-seed records: one JSON line per seed.
     lines = base.with_suffix(".jsonl").read_text().strip().splitlines()
     assert len(lines) == 3
-    # Manifest reproduces the run via --config.
-    manifest = json.loads((tmp_path / "paraboloid_20260625T000000Z_config.json").read_text())
+    # Manifest reproduces the run via --config — the WHOLE manifest file round-
+    # trips (Step 12 fix), and it pins the observed environment.
+    manifest_path = tmp_path / "paraboloid_20260625T000000Z_config.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert set(manifest) == {"stamp", "environment", "config"}
     assert manifest["config"] == cfg.to_dict()
-    assert RunConfig.from_dict(manifest["config"]) == cfg
+    assert RunConfig.from_json_file(manifest_path) == cfg
+    env = manifest["environment"]
+    assert isinstance(env["hangar_evals"], dict)   # SHA captured in this checkout
+    assert len(env["hangar_evals"]["sha"]) == 40
     # Summary persisted as JSON-shaped CellSummary list.
     summ = json.loads((tmp_path / "paraboloid_20260625T000000Z_summary.json").read_text())
     assert summ[0]["pass_rate"] == pytest.approx(2 / 3)

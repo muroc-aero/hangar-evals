@@ -69,6 +69,10 @@ class AgentResult:
     wall_clock_s: float | None = None
     num_turns: int | None = None
     tool_call_trace: list | None = field(default=None)
+    # Normalized token counts: {"input": int, "output": int, ...} — extra
+    # provider keys pass through. None means the harness reported nothing
+    # (None != 0; values are never invented).
+    tokens: dict | None = None
 
 
 class AgentDriver(Protocol):
