@@ -30,6 +30,13 @@ it also pins the OBSERVED environment: git SHAs, tool/SDK versions, platform),
 and ``<case>_<stamp>_summary.json`` (the per-cell summaries). The random seed is
 NOT yet reproducible, but the *matrix* is. Scoring is held constant; only the
 driver/model vary — that's the whole point.
+
+Runs are checkpointed (Step 18): each seed flushes to the ``.jsonl`` as it
+finishes, a harness crash becomes a retryable error row instead of killing the
+matrix, and every agent run is bounded by its case's wall-clock budget (the
+driver kills the process tree on expiry; the seed still effect-grades from the
+provenance DB). ``--resume <records.jsonl>`` reruns only the missing seeds —
+error rows are retried by default (``--keep-errors`` to keep them).
 """
 
 from __future__ import annotations
@@ -81,8 +88,8 @@ HARNESSES = {
     "opencode": (OpenCodeDriver, "qwen3:8b"),
 }
 
-_CONFIG_KEYS = ("case", "harnesses", "model", "seeds", "max_turns", "results_dir",
-                "omd_transport", "sandbox")
+_CONFIG_KEYS = ("case", "harnesses", "model", "seeds", "max_turns", "timeout_s",
+                "results_dir", "omd_transport", "sandbox")
 
 
 @dataclass(frozen=True)
@@ -92,6 +99,11 @@ class RunConfig:
     ``model`` overrides every harness's default when set. Round-trips to/from a
     JSON config file so a run can be reproduced by ``--config <manifest>`` or
     rebuilt in a Python script (modulo the not-yet-reproducible random seed).
+
+    ``max_turns`` / ``timeout_s`` (Step 18) are GLOBAL overrides; ``None``
+    (the default) defers to each case's own budgets (``Case.max_turns`` /
+    ``Case.timeout_s``). Old manifests that carry ``max_turns: 80`` reproduce
+    unchanged — 80 is every case's turn budget anyway.
 
     ``omd_transport`` picks how the agent reaches omd: ``"stdio"`` (default —
     the harness spawns it as a child) or ``"http"`` (Step 13 — a host-side
@@ -108,7 +120,8 @@ class RunConfig:
     harnesses: tuple[str, ...] = ("opencode",)
     model: str | None = None
     seeds: int = 3
-    max_turns: int = 80
+    max_turns: int | None = None
+    timeout_s: float | None = None
     results_dir: str = "results"
     omd_transport: str = "stdio"
     sandbox: str = "none"
@@ -158,11 +171,20 @@ def run_cell(
     model: str | None,
     seed: int,
     results_dir: Path,
-    max_turns: int = 80,
+    max_turns: int | None = None,
     omd_transport: str = "stdio",
     sandbox: str = "none",
+    timeout_s: float | None = None,
 ) -> dict:
-    """Run one cell and return its result record."""
+    """Run one cell and return its result record.
+
+    ``max_turns`` / ``timeout_s`` override the case's own budgets when set
+    (Step 18); the timeout is a HARD wall-clock cap enforced by the driver —
+    on expiry the agent is killed and the seed is still graded from whatever
+    omd runs its provenance DB holds.
+    """
+    turn_budget = max_turns if max_turns is not None else case.max_turns
+    wall_budget = timeout_s if timeout_s is not None else case.timeout_s
     data_root = Path(tempfile.mkdtemp(
         prefix=f"{case.name}_{harness}_s{seed}_", dir=str(results_dir / "run_data")
     )).resolve()
@@ -187,10 +209,13 @@ def run_cell(
     with server as mcp:
         result = driver.run(
             build_prompt(case), mcp, workspace if sandboxed else data_root,
-            model=model, max_turns=max_turns,
+            model=model, max_turns=turn_budget, timeout_s=wall_budget,
         )
 
-    refs = compute_refs(case.example, case.metrics)
+    # Disk-cached against the-hangar's SHA (Step 18) + memoized in-process, so
+    # N seeds and repeat runs don't recompute (ocp_three_tool refs: ~70 min).
+    refs = compute_refs(case.example, case.metrics,
+                        cache_dir=results_dir / "ref_cache")
     db = data_root / "analysis.db"
 
     # PRIMARY — effect-based (Step 11): grade the omd runs the agent actually
@@ -255,6 +280,11 @@ def run_cell(
             "wall_clock_s": result.wall_clock_s,
             "cost_usd": result.cost_usd,
             "num_turns": result.num_turns,
+            # The budgets this seed ran under, and whether the wall-clock one
+            # fired (a timed-out seed is killed but still effect-graded).
+            "max_turns": turn_budget,
+            "timeout_s": wall_budget,
+            "timed_out": result.timed_out,
             # Normalized token counts; None when the harness reported none
             # (third-party drivers that never set it still work).
             "tokens": result.tokens,
@@ -309,9 +339,76 @@ def _prov_to_dict(p) -> dict | None:
     }
 
 
+def _error_record(
+    case: Case,
+    harness: str,
+    model: str | None,
+    seed: int,
+    exc: Exception,
+    omd_transport: str,
+    sandbox: str,
+) -> dict:
+    """The record for a seed whose harness CRASHED (Step 18).
+
+    Same top-level shape as a ``run_cell`` record (aggregation and resume read
+    both uniformly); the ``error`` key marks it retryable — ``--resume`` reruns
+    these rows by default. Not used for timeouts: a timed-out seed still
+    produces a full, effect-graded record.
+    """
+    return {
+        "case": case.name,
+        "harness": harness,
+        "model": model,
+        "seed": seed,
+        "completed": False,
+        "passed": False,
+        "scores": None,
+        "reporting": {"parsed": False, "passed": None,
+                      "matches_effects": None, "scores": None},
+        "oracle": None,
+        "tool_use": {},
+        "tool_trace": [],
+        "provenance": None,
+        "telemetry": {
+            "wall_clock_s": None, "cost_usd": None, "num_turns": None,
+            "tokens": None, "omd_transport": omd_transport, "sandbox": sandbox,
+            "sandbox_image": None,
+        },
+        "error": {"type": type(exc).__name__, "message": str(exc)},
+    }
+
+
+def _record_key(record: dict) -> tuple:
+    """The identity a record has for resume: one seed of one cell."""
+    return (record["case"], record["harness"], record["model"], record["seed"])
+
+
+def load_resume_records(records_path: Path, retry_errors: bool = True) -> list[dict]:
+    """Read a prior run's ``.jsonl`` into the records ``run_matrix`` may reuse.
+
+    Keeps the LAST record per (case, harness, model, seed) — a resumed file
+    legitimately contains a superseded row before its retry. With
+    ``retry_errors`` (the default), error rows are dropped so those seeds run
+    again; without it they are kept as final results.
+    """
+    latest: dict[tuple, dict] = {}
+    for line in Path(records_path).read_text().splitlines():
+        if line.strip():
+            record = json.loads(line)
+            latest[_record_key(record)] = record
+    if retry_errors:
+        latest = {k: r for k, r in latest.items() if not r.get("error")}
+    return list(latest.values())
+
+
 def _print_summary(record: dict) -> None:
     t = record["telemetry"]
     cell = f"{record['case']} · {record['harness']}/{record['model']} · seed {record['seed']}"
+    if record.get("error"):
+        err = record["error"]
+        print(f"  {cell}")
+        print(f"    result: ERROR ({err['type']}): {err['message'][:300]}")
+        return
     verdict = "PASS" if record["passed"] else ("FAIL" if record["completed"] else "NO RUN")
     tu = record["tool_use"]
     rep = record.get("reporting") or {}
@@ -321,6 +418,8 @@ def _print_summary(record: dict) -> None:
              if t.get("omd_transport", "stdio") != "stdio" else "")
     if t.get("sandbox", "none") != "none":
         omd_s += f" sandbox={t['sandbox']}"
+    if t.get("timed_out"):
+        omd_s += " TIMED OUT"
     print(f"  {cell}")
     print(f"    result: {verdict} (effect-graded) | turns={t['num_turns']} "
           f"wall={t['wall_clock_s']:.1f}s cost={t['cost_usd']}{tok_s}{omd_s}")
@@ -355,12 +454,23 @@ def _print_cell_summary(s: CellSummary) -> None:
         print(f"     out-tok min/med/max: {o.min:g} / {o.median:g} / {o.max:g}")
 
 
-def run_matrix(config: RunConfig, stamp: str) -> list[CellSummary]:
+def run_matrix(
+    config: RunConfig,
+    stamp: str,
+    resume_records: list[dict] | None = None,
+) -> list[CellSummary]:
     """Run the full matrix in ``config``; write records + manifest + summaries.
 
     One cell per (harness) — each run ``config.seeds`` times, then reduced to a
     ``CellSummary``. ``stamp`` is injected by the caller so output naming is
     deterministic and the function stays testable. Returns the cell summaries.
+
+    Checkpointing (Step 18): every seed is flushed to the ``.jsonl`` as it
+    finishes, and a harness crash becomes an ``_error_record`` row instead of
+    aborting the matrix. ``resume_records`` (from ``load_resume_records``)
+    turns the call into a resume: seeds already in it are reused, everything
+    else — including retried error rows — runs and is APPENDED to the same
+    records file, so the aggregation always reads the latest row per seed.
     """
     unknown = [h for h in config.harnesses if h not in HARNESSES]
     if unknown:
@@ -377,16 +487,21 @@ def run_matrix(config: RunConfig, stamp: str) -> list[CellSummary]:
     manifest_path = results_dir / f"{base}_config.json"
     summary_path = results_dir / f"{base}_summary.json"
 
+    resuming = resume_records is not None
+    done = {_record_key(r): r for r in (resume_records or [])}
+
     # Manifest FIRST so the run is reproducible (via `--config <this file>`) even
     # if it crashes partway. Records the exact matrix, modulo the random seed —
     # plus the OBSERVED environment (git SHAs, tool versions; Step 12), which
-    # reproduction compares rather than replays.
-    manifest_path.write_text(json.dumps(
-        {"stamp": stamp, "environment": capture_environment(),
-         "config": config.to_dict()}, indent=2))
+    # reproduction compares rather than replays. On resume the original
+    # manifest (and its as-first-run environment) is preserved.
+    if not (resuming and manifest_path.exists()):
+        manifest_path.write_text(json.dumps(
+            {"stamp": stamp, "environment": capture_environment(),
+             "config": config.to_dict()}, indent=2))
 
     summaries: list[CellSummary] = []
-    with records_path.open("w") as fh:
+    with records_path.open("a" if resuming else "w") as fh:
         for harness in config.harnesses:
             factory, default_model = HARNESSES[harness]
             model = config.model or default_model
@@ -402,10 +517,23 @@ def run_matrix(config: RunConfig, stamp: str) -> list[CellSummary]:
                 driver = factory()
             cell_records: list[dict] = []
             for seed in range(config.seeds):
-                record = run_cell(case, driver, harness, model, seed,
-                                  results_dir, config.max_turns,
-                                  omd_transport=config.omd_transport,
-                                  sandbox=config.sandbox)
+                reused = done.get((case.name, harness, model, seed))
+                if reused is not None:
+                    print(f"  {case.name} · {harness}/{model} · seed {seed}: "
+                          f"reused from prior run")
+                    cell_records.append(reused)
+                    continue
+                try:
+                    record = run_cell(case, driver, harness, model, seed,
+                                      results_dir, config.max_turns,
+                                      omd_transport=config.omd_transport,
+                                      sandbox=config.sandbox,
+                                      timeout_s=config.timeout_s)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    record = _error_record(case, harness, model, seed, exc,
+                                           config.omd_transport, config.sandbox)
                 fh.write(json.dumps(record) + "\n")
                 fh.flush()
                 cell_records.append(record)
@@ -425,23 +553,50 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", type=Path,
                         help="JSON run config (a manifest); overrides the flags below")
+    parser.add_argument("--resume", type=Path, metavar="RECORDS_JSONL",
+                        help="a prior run's records .jsonl: rerun only its missing "
+                             "seeds (error rows are retried by default) and append "
+                             "to the same files; config/stamp come from the "
+                             "sibling _config.json manifest unless --config is given")
+    parser.add_argument("--keep-errors", action="store_true",
+                        help="with --resume: keep prior error rows as final "
+                             "instead of retrying them")
     parser.add_argument("--case", default="paraboloid", choices=list(CASES))
     parser.add_argument("--harness", default="opencode",
                         help="comma-separated: " + ",".join(HARNESSES))
     parser.add_argument("--model", default=None, help="override the harness default model")
     parser.add_argument("--seeds", type=int, default=3)
-    parser.add_argument("--max-turns", type=int, default=80)
+    parser.add_argument("--max-turns", type=int, default=None,
+                        help="override every case's turn budget (default: per-case)")
+    parser.add_argument("--timeout-s", type=float, default=None,
+                        help="override every case's wall-clock budget in seconds "
+                             "(default: per-case, 900 for most)")
     parser.add_argument("--results-dir", default="results")
     args = parser.parse_args(argv)
 
-    if args.config:
+    resume_records = None
+    if args.resume:
+        records_path = args.resume.resolve()
+        manifest_path = records_path.with_name(records_path.stem + "_config.json")
+        config = RunConfig.from_json_file(args.config or manifest_path)
+        stamp = json.loads(manifest_path.read_text())["stamp"]
+        expected = (Path(config.results_dir).resolve()
+                    / f"{config.case}_{stamp}.jsonl")
+        if expected != records_path:
+            parser.error(
+                f"--resume {records_path} does not match its manifest's config "
+                f"(which writes to {expected}); resume with the records file "
+                "that belongs to the manifest")
+        resume_records = load_resume_records(records_path,
+                                             retry_errors=not args.keep_errors)
+    elif args.config:
         config = RunConfig.from_json_file(args.config)
     else:
         harnesses = tuple(h.strip() for h in args.harness.split(",") if h.strip())
         config = RunConfig(
             case=args.case, harnesses=harnesses, model=args.model,
             seeds=args.seeds, max_turns=args.max_turns,
-            results_dir=str(args.results_dir),
+            timeout_s=args.timeout_s, results_dir=str(args.results_dir),
         )
 
     unknown = [h for h in config.harnesses if h not in HARNESSES]
@@ -450,9 +605,13 @@ def main(argv: list[str] | None = None) -> int:
     if config.case not in CASES:
         parser.error(f"unknown case: {config.case}. Choose from {list(CASES)}")
 
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    print(f"Running {config.case} × {list(config.harnesses)} × {config.seeds} seed(s)\n")
-    run_matrix(config, stamp)
+    if resume_records is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        print(f"Running {config.case} × {list(config.harnesses)} × {config.seeds} seed(s)\n")
+    else:
+        print(f"Resuming {config.case} × {list(config.harnesses)} × {config.seeds} "
+              f"seed(s) — {len(resume_records)} seed(s) reused\n")
+    run_matrix(config, stamp, resume_records=resume_records)
     return 0
 
 

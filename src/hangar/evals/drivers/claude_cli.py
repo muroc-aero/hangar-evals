@@ -38,6 +38,7 @@ from hangar.evals.drivers.claude_sdk import (
     _normalize_tool_name,
     _normalize_usage,
 )
+from hangar.evals.drivers.proc import run_process
 from hangar.evals.drivers.sandbox import CONTAINER_WORKSPACE, ContainerSandbox
 from hangar.evals.trace import ToolCall
 
@@ -131,6 +132,7 @@ class ClaudeCliDriver:
         workspace: Path,
         model: str | None = None,
         max_turns: int = 80,
+        timeout_s: float | None = None,
     ) -> AgentResult:
         if not os.environ.get(_TOKEN_VAR):
             raise RuntimeError(
@@ -143,17 +145,22 @@ class ClaudeCliDriver:
         (workspace / "mcp_config.json").write_text(
             json.dumps(render_mcp_config(mcp), indent=2))
 
-        argv = self.build_argv(prompt, workspace, mcp.name, model, max_turns)
+        container = f"hangar_{workspace.name}"
+        argv = self.build_argv(prompt, workspace, mcp.name, model, max_turns,
+                               container=container)
         start = time.monotonic()
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        proc = run_process(argv, timeout_s=timeout_s)
         wall = time.monotonic() - start
+        if proc.timed_out:
+            # Killing the docker client does not stop the container.
+            subprocess.run(["docker", "kill", container],
+                           capture_output=True, text=True)
 
         # Persist the raw event stream next to the agent's scratch files so
         # every run is debuggable after the fact.
         (workspace / "claude_events.jsonl").write_text(proc.stdout)
 
-        if proc.returncode != 0:
+        if not proc.timed_out and proc.returncode != 0:
             raise RuntimeError(
                 f"sandboxed claude run failed (exit {proc.returncode}):\n{proc.stderr}")
         parsed = parse_stream_json(proc.stdout, mcp.name)
@@ -164,6 +171,7 @@ class ClaudeCliDriver:
             num_turns=parsed.num_turns,
             tool_call_trace=parsed.tool_calls,
             tokens=_normalize_usage(parsed.usage),
+            timed_out=proc.timed_out,
         )
 
     def build_argv(
@@ -173,6 +181,7 @@ class ClaudeCliDriver:
         server: str,
         model: str | None,
         max_turns: int,
+        container: str | None = None,
     ) -> list[str]:
         """The docker-wrapped ``claude -p`` invocation. Separate for testability.
 
@@ -192,4 +201,4 @@ class ClaudeCliDriver:
         if model:
             inner += ["--model", model]
         inner += ["--disallowed-tools", *_CONTAMINATION_TOOLS]
-        return self.sandbox.wrap_argv(inner, workspace)
+        return self.sandbox.wrap_argv(inner, workspace, name=container)

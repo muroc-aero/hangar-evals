@@ -41,6 +41,7 @@ def test_agent_result_defaults():
     assert r.wall_clock_s is None
     assert r.num_turns is None
     assert r.tool_call_trace is None
+    assert r.timed_out is False
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +153,78 @@ def test_driver_captures_tool_call_trace(monkeypatch, tmp_path):
     assert [c.tool for c in trace] == ["start_session", "run_plan"]  # prefix stripped
     assert trace[0].ok is True and trace[0].error_code is None
     assert trace[1].ok is False and trace[1].error_code == "USER_INPUT_ERROR"
+
+
+def test_driver_timeout_returns_partial_state(monkeypatch, tmp_path):
+    # Step 18: the fake stream emits real work (with per-message usage), then
+    # hangs — the model of both observed SDK failures. The wall-clock budget
+    # must kill the run and still hand back everything seen so far.
+    mod, _ = _fake_sdk()
+
+    class AssistantWithUsage(mod.AssistantMessage):
+        def __init__(self, content, usage):
+            super().__init__(content)
+            self.usage = usage
+
+    async def hanging_query(prompt, options):
+        import asyncio
+
+        yield AssistantWithUsage(
+            [mod.TextBlock("partial progress")],
+            {"input_tokens": 100, "output_tokens": 10})
+        yield AssistantWithUsage(
+            [mod.ToolUseBlock("t1", "mcp__omd__start_session")],
+            {"input_tokens": 200, "output_tokens": 5})
+        yield mod.UserMessage(
+            [mod.ToolResultBlock("t1", '{"session_id": "s1"}')])
+        await asyncio.sleep(3600)   # the deterministic post-physics hang
+
+    mod.query = hanging_query
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
+
+    result = ClaudeAgentSDKDriver().run(
+        "task", MCPServerSpec.omd(tmp_path), tmp_path, cwd=tmp_path,
+        timeout_s=0.5,
+    )
+    assert result.timed_out is True
+    assert result.final_text == "partial progress"
+    assert [c.tool for c in result.tool_call_trace] == ["start_session"]
+    # Cost fallback (item 5): no ResultMessage ever arrived, so cost is an
+    # honest None and tokens come from the per-message accumulation.
+    assert result.cost_usd is None
+    assert result.tokens == {"input": 300, "output": 15}
+    assert result.wall_clock_s < 30
+
+
+def test_driver_result_message_usage_beats_accumulation(monkeypatch, tmp_path):
+    # When the run completes, the ResultMessage's canonical usage wins over
+    # whatever was accumulated along the way.
+    mod, _ = _fake_sdk()
+
+    class AssistantWithUsage(mod.AssistantMessage):
+        def __init__(self, content, usage):
+            super().__init__(content)
+            self.usage = usage
+
+    class ResultWithUsage(mod.ResultMessage):
+        def __init__(self):
+            super().__init__(result="done", total_cost_usd=0.5)
+            self.num_turns = 2
+            self.usage = {"input_tokens": 999, "output_tokens": 111}
+
+    async def query(prompt, options):
+        yield AssistantWithUsage([mod.TextBlock("hi")],
+                                 {"input_tokens": 1, "output_tokens": 1})
+        yield ResultWithUsage()
+
+    mod.query = query
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", mod)
+
+    result = ClaudeAgentSDKDriver().run(
+        "task", MCPServerSpec.omd(tmp_path), tmp_path, cwd=tmp_path)
+    assert result.timed_out is False
+    assert result.tokens == {"input": 999, "output": 111}
+    assert result.cost_usd == 0.5
 
 
 def test_driver_without_sdk_raises_clear_error(monkeypatch, tmp_path):

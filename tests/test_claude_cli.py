@@ -111,24 +111,25 @@ def test_run_without_token_fails_fast_with_guidance(monkeypatch, tmp_path):
 
 def test_run_writes_config_and_events_and_wraps_in_docker(monkeypatch, tmp_path):
     import hangar.evals.drivers.claude_cli as cli_mod
+    from hangar.evals.drivers.proc import ProcOutcome
 
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
     seen = {}
 
-    class _Proc:
-        returncode = 0
-        stdout = _CANNED
-        stderr = ""
-
-    def fake_run(argv, **kwargs):
+    def fake_run_process(argv, timeout_s=None, cwd=None):
         seen["argv"] = argv
-        return _Proc()
+        seen["timeout_s"] = timeout_s
+        return ProcOutcome(0, _CANNED, "", timed_out=False)
 
-    monkeypatch.setattr(cli_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(cli_mod, "run_process", fake_run_process)
     spec = MCPServerSpec.omd_http("http://host.docker.internal:8123/mcp")
-    result = ClaudeCliDriver().run("task", spec, tmp_path, model="claude-opus-4-8")
+    result = ClaudeCliDriver().run("task", spec, tmp_path, model="claude-opus-4-8",
+                                   timeout_s=456.0)
 
     assert seen["argv"][:3] == ["docker", "run", "--rm"]
+    # The container is named after the workspace so a timeout can kill it.
+    assert seen["argv"][seen["argv"].index("--name") + 1] == f"hangar_{tmp_path.name}"
+    assert seen["timeout_s"] == 456.0
     cfg = json.loads((tmp_path / "mcp_config.json").read_text())
     assert cfg["mcpServers"]["omd"]["url"] == "http://host.docker.internal:8123/mcp"
     assert (tmp_path / "claude_events.jsonl").read_text() == _CANNED
@@ -137,3 +138,32 @@ def test_run_writes_config_and_events_and_wraps_in_docker(monkeypatch, tmp_path)
     assert result.num_turns == 7
     assert result.tokens == {"input": 900, "output": 120}
     assert [c.tool for c in result.tool_call_trace] == ["start_session", "run_plan"]
+    assert result.timed_out is False
+
+
+def test_run_timeout_kills_container_and_keeps_partial_stream(monkeypatch, tmp_path):
+    import hangar.evals.drivers.claude_cli as cli_mod
+    from hangar.evals.drivers.proc import ProcOutcome
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    # Everything before the (never-delivered) result event: text + one call.
+    partial = "\n".join(_CANNED.splitlines()[:3])
+    monkeypatch.setattr(
+        cli_mod, "run_process",
+        lambda argv, timeout_s=None, cwd=None:
+            ProcOutcome(None, partial, "", timed_out=True))
+    killed: list = []
+    monkeypatch.setattr(
+        cli_mod.subprocess, "run",
+        lambda argv, **kw: killed.append(argv) or None)
+
+    spec = MCPServerSpec.omd_http("http://host.docker.internal:8123/mcp")
+    result = ClaudeCliDriver().run("task", spec, tmp_path, timeout_s=1.0)
+
+    assert killed == [["docker", "kill", f"hangar_{tmp_path.name}"]]
+    assert result.timed_out is True
+    # Partial evidence survives: the running text and the opened tool call.
+    assert result.final_text == "working on it"
+    assert [c.tool for c in result.tool_call_trace] == ["start_session"]
+    assert result.cost_usd is None      # priced only at result delivery
+    assert (tmp_path / "claude_events.jsonl").read_text() == partial

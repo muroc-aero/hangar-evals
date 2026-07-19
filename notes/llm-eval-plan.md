@@ -1144,6 +1144,44 @@ relaxed tools map (Step 14b)`. User reviews/merges.
 
 ---
 
+## 4i. Step 18 spec — runner hardening: timeouts, checkpoint/resume, ref cache, cost fallback (IMPLEMENTED 2026-07-19, awaiting review/merge)
+
+Motivated by the prototype sweep's failure modes: both observed SDK failures
+(1 crash, 1 deterministic 3× hang) came AFTER the physics finished, and a
+resume required manual JSON surgery. Four changes, all runner/driver-side —
+no scoring, case-prompt, or oracle changes:
+
+1. **Per-case wall-clock + turn budgets** (`Case.timeout_s` 900 s default,
+   2700 s for ocp_three_tool; `Case.max_turns` 80). Enforced in the DRIVERS
+   (a sync runner can't interrupt them): the CLI drivers run through
+   `drivers/proc.run_process` — `start_new_session` + group-SIGKILL so
+   grandchildren die, partial stdout preserved; sandboxed drivers `--name`
+   the container and `docker kill` it (killing the docker client alone leaves
+   the container running); the SDK driver wraps its stream in
+   `asyncio.wait_for` with a mutable `_StreamState` so partial text/trace
+   survive cancellation. Expiry is an OUTCOME, not an error: the seed still
+   effect-grades from the provenance DB (`telemetry.timed_out` marks it).
+   `RunConfig.max_turns/timeout_s` are now `None` = per-case; old manifests
+   with `max_turns: 80` reproduce unchanged.
+2. **Checkpoint + resume.** A harness crash becomes a retryable `error` row
+   (same record shape) instead of aborting the matrix. `--resume
+   <records.jsonl>` reads config+stamp from the sibling manifest, reruns only
+   missing seeds — error rows retried by default (`--keep-errors` opts out) —
+   and APPENDS; aggregation reads latest-row-per-seed.
+3. **Lane A reference caching** (the ~70 min ocp_three_tool refs, previously
+   recomputed PER SEED): in-process memo + disk cache under
+   `results/ref_cache/` keyed `(example, module, the-hangar HEAD SHA)`;
+   bypassed when the checkout is dirty (no trustworthy key).
+4. **Cost/token fallback (SDK).** Usage is accumulated per message so a
+   killed run still reports tokens; `cost_usd` stays honestly `None` when no
+   `ResultMessage` arrived (the SDK prices only at result delivery).
+
+**Git.** One commit: `feat: runner hardening — per-case timeouts,
+checkpoint/resume, Lane-A ref cache, cost fallback (Step 18)`. User
+reviews/merges.
+
+---
+
 ## 5. Repo scaffolding decision + the seam
 
 **Separate repo `hangar-evals`** (importable as `hangar.evals` via PEP 420),
@@ -1316,6 +1354,38 @@ exact current tags before pulling.
 
 - [ ] **Dev venv:** own venv for hangar-evals (with the-hangar installed in) vs
       sharing the-hangar's `.venv` (current). Both work with the seam.
+- [ ] **Isolate the-hangar checkout from live development (found 2026-07-19).**
+      Evals currently read the SIBLING `../the-hangar` working tree — which is
+      also where the-hangar development happens, sometimes concurrently in
+      another session. Observed failure: mid-session, another session switched
+      the-hangar to `lane-c-full-coverage` (predates the PR #100 Host-allowlist
+      fix) and `test_container_reaches_omd_over_advertised_url` started 421-ing;
+      it "fixed itself" when the checkout moved again. The same hazard applies
+      to LIVE EVAL RUNS: a branch switch mid-sweep silently changes Lane A
+      reference physics, omd server behavior, and prompt files between (or
+      within!) seeds. Step 18's guards help but don't close it: the ref cache
+      keys on the-hangar SHA (clean only) and the manifest records SHA+dirty —
+      detection, not prevention. **Fix direction: pin evals to a dedicated,
+      eval-owned checkout** — but the approach needs thought, because the seam
+      has TWO paths into the-hangar and they must not diverge:
+        1. `HANGAR_REPO` (prompts, Lane A subprocess refs, anchor cwd) — trivially
+           repointable at a `git worktree` (cheap, shares objects, pinnable to a
+           SHA) or an `rsync`/`cp` snapshot (fully decoupled, but stales silently
+           and duplicates ~the repo).
+        2. The **venv's editable `hangar.*` install** (omd/oas/... servers,
+           spawned via `sys.executable -m hangar.omd.server`) — this follows
+           wherever the editable install points (today: the live working tree),
+           NOT `$HANGAR_REPO`. A worktree for path 1 alone would run mixed
+           versions: pinned prompts/refs against live server code — worse than
+           today because it *looks* isolated.
+      So the real shape is probably: eval-owned worktree at a chosen SHA/branch
+      **+ its own venv installed (editable or not) from that worktree** — i.e.
+      this decision collapses into the "Dev venv" item above; decide them
+      together. Also decide the update ritual (when/how the pin advances — likely
+      manual, recorded in the manifest) and add a runner preflight that fails
+      loudly if the resolved `HANGAR_REPO` and the imported `hangar.*` package
+      resolve to different roots (cheap guard, useful under ANY layout —
+      `importlib.util.find_spec("hangar.omd").origin` vs `resolve_hangar_repo()`).
 - [ ] Serving runtime of record: Ollama (now) → native MLX (later) as a serving
       variable in the matrix. **Resolved facts (§9):** Ollama MLX accelerates only
       Qwen3.5/3.6/Gemma 4; native-MLX tool calling needs `mlx-openai-server`, not

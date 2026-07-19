@@ -12,18 +12,18 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
 import sys
-import types
 
 import pytest
 
+import hangar.evals.drivers.opencode as opencode_mod
 from hangar.evals.drivers import MCPServerSpec
 from hangar.evals.drivers.opencode import (
     OpenCodeDriver,
     parse_opencode_events,
     render_opencode_config,
 )
+from hangar.evals.drivers.proc import ProcOutcome
 
 # Model for the live smoke. Overridable; defaults to the pulled smoke model.
 LIVE_MODEL = os.environ.get("HANGAR_EVALS_OPENCODE_MODEL", "qwen3:8b")
@@ -227,31 +227,32 @@ def test_parse_events_schema_error_envelope_is_not_ok():
 
 
 # ---------------------------------------------------------------------------
-# run() against a monkeypatched subprocess
+# run() against a monkeypatched run_process
 # ---------------------------------------------------------------------------
 
 
-def test_run_writes_config_parses_events_and_closes_stdin(monkeypatch, tmp_path):
+def test_run_writes_config_parses_events_and_passes_budgets(monkeypatch, tmp_path):
     captured: dict = {}
 
-    def fake_run(argv, capture_output, text, cwd, stdin):
+    def fake_run_process(argv, timeout_s=None, cwd=None):
         captured["argv"] = argv
         captured["cwd"] = cwd
-        captured["stdin"] = stdin
-        return types.SimpleNamespace(returncode=0, stdout=SPIKE_JSONL, stderr="")
+        captured["timeout_s"] = timeout_s
+        return ProcOutcome(0, SPIKE_JSONL, "", timed_out=False)
 
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(opencode_mod, "run_process", fake_run_process)
 
     spec = MCPServerSpec.omd(tmp_path)
-    result = OpenCodeDriver().run("do the task", spec, tmp_path, model="qwen3:8b")
+    result = OpenCodeDriver().run("do the task", spec, tmp_path, model="qwen3:8b",
+                                  timeout_s=123.0)
 
     # Config landed in the workspace and is the rendered dict.
     cfg = json.loads((tmp_path / "opencode.json").read_text())
     assert cfg["provider"]["ollama"]["models"]["qwen3:8b"] == {"tools": True}
     assert cfg["mcp"]["omd"]["command"][0] == sys.executable
 
-    # stdin MUST be closed (the hang fix), and json events get parsed.
-    assert captured["stdin"] == subprocess.DEVNULL
+    # The wall-clock budget reaches the process layer (which owns stdin/kill).
+    assert captured["timeout_s"] == 123.0
     assert captured["cwd"] == str(tmp_path)
     assert result.final_text == 'report:\n```json\n{"status": "done"}\n```'
     assert [c.tool for c in result.tool_call_trace] == ["start_session"]
@@ -259,18 +260,68 @@ def test_run_writes_config_parses_events_and_closes_stdin(monkeypatch, tmp_path)
     assert result.num_turns == 1
     assert result.tokens == {"output": 219}
     assert result.wall_clock_s is not None and result.wall_clock_s >= 0
+    assert result.timed_out is False
 
     # Raw events persisted for debuggability.
     assert (tmp_path / "opencode_events.jsonl").read_text() == SPIKE_JSONL
 
 
 def test_run_nonzero_exit_raises(monkeypatch, tmp_path):
-    def fake_run(argv, capture_output, text, cwd, stdin):
-        return types.SimpleNamespace(returncode=1, stdout="", stderr="provider not found")
-
-    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        opencode_mod, "run_process",
+        lambda argv, timeout_s=None, cwd=None:
+            ProcOutcome(1, "", "provider not found", timed_out=False))
     with pytest.raises(RuntimeError, match="opencode run failed"):
         OpenCodeDriver().run("x", MCPServerSpec.omd(tmp_path), tmp_path)
+
+
+def test_run_timeout_keeps_partial_evidence_and_does_not_raise(monkeypatch, tmp_path):
+    # Step 18: expiry is an OUTCOME, not an error — the partial event stream
+    # still yields the trace/report, and the record grades from the DB anyway.
+    monkeypatch.setattr(
+        opencode_mod, "run_process",
+        lambda argv, timeout_s=None, cwd=None:
+            ProcOutcome(None, SPIKE_JSONL, "", timed_out=True))
+
+    result = OpenCodeDriver().run("x", MCPServerSpec.omd(tmp_path), tmp_path,
+                                  timeout_s=1.0)
+    assert result.timed_out is True
+    assert [c.tool for c in result.tool_call_trace] == ["start_session"]
+    assert (tmp_path / "opencode_events.jsonl").read_text() == SPIKE_JSONL
+
+
+def test_run_sandboxed_timeout_kills_the_container(monkeypatch, tmp_path):
+    # SIGKILL on the docker CLI leaves the container running — the driver must
+    # docker-kill it by the name it gave the run.
+    from hangar.evals.drivers.sandbox import OPENCODE_IMAGE, ContainerSandbox
+
+    monkeypatch.setattr(
+        opencode_mod, "run_process",
+        lambda argv, timeout_s=None, cwd=None:
+            ProcOutcome(None, "", "", timed_out=True))
+    killed: list = []
+    monkeypatch.setattr(
+        opencode_mod.subprocess, "run",
+        lambda argv, **kw: killed.append(argv) or None)
+
+    driver = OpenCodeDriver(sandbox=ContainerSandbox(
+        image=OPENCODE_IMAGE, env_passthrough=()))
+    spec = MCPServerSpec.omd_http("http://host.docker.internal:8123/mcp")
+    result = driver.run("x", spec, tmp_path, timeout_s=1.0)
+
+    assert result.timed_out is True
+    assert killed == [["docker", "kill", f"hangar_{tmp_path.name}"]]
+
+
+def test_build_argv_sandboxed_names_the_container(tmp_path):
+    from hangar.evals.drivers.sandbox import OPENCODE_IMAGE, ContainerSandbox
+
+    driver = OpenCodeDriver(sandbox=ContainerSandbox(
+        image=OPENCODE_IMAGE, env_passthrough=()))
+    argv = driver.build_argv("task", tmp_path, "qwen3:8b", container="hangar_x1")
+    assert argv[argv.index("--name") + 1] == "hangar_x1"
+    # Unsandboxed there is no docker wrapper, so no --name either.
+    assert "--name" not in OpenCodeDriver().build_argv("task", tmp_path, "qwen3:8b")
 
 
 # ---------------------------------------------------------------------------

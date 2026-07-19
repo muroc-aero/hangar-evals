@@ -49,9 +49,18 @@ class ContainerSandbox:
     image: str = ANCHOR_IMAGE
     env_passthrough: tuple[str, ...] = ("CLAUDE_CODE_OAUTH_TOKEN",)
 
-    def wrap_argv(self, inner: list[str], workspace: Path) -> list[str]:
-        """``docker run --rm ... <image> <inner>`` — ONLY the workspace mounted."""
+    def wrap_argv(
+        self, inner: list[str], workspace: Path, name: str | None = None
+    ) -> list[str]:
+        """``docker run --rm ... <image> <inner>`` — ONLY the workspace mounted.
+
+        ``name`` (Step 18) names the container so a timed-out run can be
+        ``docker kill``-ed: SIGKILL on the docker CLI client does NOT stop the
+        container it started.
+        """
         argv = ["docker", "run", "--rm"]
+        if name:
+            argv += ["--name", name]
         for var in self.env_passthrough:
             argv += ["-e", var]
         argv += [

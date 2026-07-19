@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hangar.evals.drivers.base import AgentResult, MCPServerSpec
+from hangar.evals.drivers.proc import run_process
 from hangar.evals.drivers.sandbox import CONTAINER_WORKSPACE, ContainerSandbox
 from hangar.evals.trace import ToolCall, parse_omd_error_code
 
@@ -230,6 +231,7 @@ class OpenCodeDriver:
         data_root: Path,
         model: str = "qwen3:8b",  # pulled floor model (non-MLX); runner overrides per matrix
         max_turns: int = 80,  # accepted for interface parity; OpenCode has no cap flag
+        timeout_s: float | None = None,
     ) -> AgentResult:
         data_root = Path(data_root)
         data_root.mkdir(parents=True, exist_ok=True)
@@ -239,20 +241,25 @@ class OpenCodeDriver:
             sandboxed=self.sandbox is not None)
         (data_root / "opencode.json").write_text(json.dumps(config, indent=2))
 
-        argv = self.build_argv(prompt, data_root, model)
+        container = f"hangar_{data_root.name}" if self.sandbox else None
+        argv = self.build_argv(prompt, data_root, model, container=container)
         start = time.monotonic()
-        # stdin=DEVNULL is REQUIRED: opencode run blocks on an open stdin.
-        proc = subprocess.run(
-            argv, capture_output=True, text=True, cwd=str(data_root),
-            stdin=subprocess.DEVNULL,
-        )
+        # run_process closes stdin (REQUIRED: opencode run blocks on an open
+        # stdin) and, on timeout, group-kills the tree and keeps the partial
+        # event stream — the report and trace may be complete even if the
+        # harness hung at exit.
+        proc = run_process(argv, timeout_s=timeout_s, cwd=str(data_root))
         wall = time.monotonic() - start
+        if proc.timed_out and container:
+            # Killing the docker client does not stop the container.
+            subprocess.run(["docker", "kill", container],
+                           capture_output=True, text=True)
 
         # Persist the raw event stream so every run is debuggable after the
         # fact (OpenCode itself does not retain `run`-mode transcripts).
         (data_root / "opencode_events.jsonl").write_text(proc.stdout)
 
-        if proc.returncode != 0:
+        if not proc.timed_out and proc.returncode != 0:
             raise RuntimeError(
                 f"opencode run failed (exit {proc.returncode}) for "
                 f"{self.provider}/{model}:\n{proc.stderr}"
@@ -265,14 +272,22 @@ class OpenCodeDriver:
             num_turns=parsed.num_turns,
             tool_call_trace=parsed.tool_calls,
             tokens=parsed.tokens,
+            timed_out=proc.timed_out,
         )
 
-    def build_argv(self, prompt: str, data_root: Path, model: str) -> list[str]:
+    def build_argv(
+        self,
+        prompt: str,
+        data_root: Path,
+        model: str,
+        container: str | None = None,
+    ) -> list[str]:
         """The ``opencode run`` invocation. Separate for testability.
 
         Sandboxed, the inner argv sees only container paths (``--dir
         /workspace``, where the workspace — holding ``opencode.json`` — is
-        mounted) and gets docker-wrapped with no env passthrough.
+        mounted) and gets docker-wrapped with no env passthrough; ``container``
+        names the container so a timed-out run can be ``docker kill``-ed.
         """
         inner = [
             self.binary,
@@ -284,5 +299,5 @@ class OpenCodeDriver:
             prompt,
         ]
         if self.sandbox:
-            return self.sandbox.wrap_argv(inner, data_root)
+            return self.sandbox.wrap_argv(inner, data_root, name=container)
         return inner

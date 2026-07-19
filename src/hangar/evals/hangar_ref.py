@@ -17,6 +17,12 @@ References are computed exactly as
 subprocess runs under the current interpreter (``sys.executable``), which must
 therefore have the-hangar installed -- the documented dev setup is
 hangar-evals editable-installed into a venv that also has the-hangar.
+
+References are cached at two levels (Step 18 -- ocp_three_tool's take ~70 min):
+an in-process memo (so N seeds of one run never recompute, whatever the repo
+state) and an optional disk cache keyed on ``(example, module, the-hangar
+HEAD SHA)``, used only when the checkout is clean -- a dirty working tree has
+no trustworthy key, so it recomputes every process.
 """
 
 from __future__ import annotations
@@ -67,8 +73,40 @@ def examples_dir(hangar_repo: Path | None = None) -> Path:
     return repo / EXAMPLES_SUBDIR
 
 
+# In-process memo: (example, module, repo path) -> reference dict. Valid for
+# the life of the process (a multi-seed run), regardless of repo dirtiness.
+_MEMO: dict[tuple[str, str, str], dict] = {}
+
+_GIT_TIMEOUT_S = 10
+
+
+def _repo_state(repo: Path) -> tuple[str, bool] | None:
+    """``(HEAD sha, dirty)`` for a checkout, or ``None`` if git can't say.
+
+    Kept local (not imported from ``environment``) because ``environment``
+    imports this module.
+    """
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT_S,
+        )
+        status = subprocess.run(
+            ["git", "-C", str(repo), "status", "--porcelain"],
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT_S,
+        )
+        if sha.returncode != 0 or status.returncode != 0:
+            return None
+        return sha.stdout.strip(), bool(status.stdout.strip())
+    except Exception:
+        return None
+
+
 def lane_a_reference(
-    example: str, module: str, hangar_repo: Path | None = None
+    example: str,
+    module: str,
+    hangar_repo: Path | None = None,
+    cache_dir: Path | None = None,
 ) -> dict:
     """Compute a Lane A reference by running ``<example>.lane_a.<module>.run()``.
 
@@ -76,27 +114,52 @@ def lane_a_reference(
     ``eval_lane_c.py``. The interpreter must have the-hangar installed; if the
     reference script raises (e.g. a missing dependency), the subprocess stderr
     is surfaced in the raised ``RuntimeError``.
+
+    ``cache_dir`` enables the disk cache: a hit returns the stored values with
+    no subprocess; a miss computes and stores them. Cache files are keyed on
+    the-hangar's HEAD SHA and only read/written when its working tree is clean
+    -- otherwise the SHA doesn't identify the code that produced the numbers.
     """
     repo = hangar_repo or resolve_hangar_repo()
-    examples = repo / EXAMPLES_SUBDIR
-    code = (
-        "import json, sys\n"
-        f"sys.path.insert(0, {str(examples)!r})\n"
-        f"from {example}.lane_a.{module} import run\n"
-        "print(json.dumps(run(), default=float))\n"
-    )
-    proc = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        cwd=str(repo),
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"Lane A reference {example}.lane_a.{module} failed "
-            f"(interpreter {sys.executable}):\n{proc.stderr}"
+    memo_key = (example, module, str(repo))
+
+    cache_path = None
+    if cache_dir is not None:
+        state = _repo_state(repo)
+        if state is not None and not state[1]:
+            cache_path = Path(cache_dir) / f"{example}.{module}.{state[0][:12]}.json"
+
+    ref = _MEMO.get(memo_key)
+    if ref is None and cache_path is not None and cache_path.exists():
+        ref = json.loads(cache_path.read_text())
+    if ref is None:
+        examples = repo / EXAMPLES_SUBDIR
+        code = (
+            "import json, sys\n"
+            f"sys.path.insert(0, {str(examples)!r})\n"
+            f"from {example}.lane_a.{module} import run\n"
+            "print(json.dumps(run(), default=float))\n"
         )
-    return json.loads(proc.stdout.strip().splitlines()[-1])
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            cwd=str(repo),
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"Lane A reference {example}.lane_a.{module} failed "
+                f"(interpreter {sys.executable}):\n{proc.stderr}"
+            )
+        ref = json.loads(proc.stdout.strip().splitlines()[-1])
+
+    _MEMO[memo_key] = ref
+    # Backfill the disk cache even on a memo hit — a caller that first ran
+    # without cache_dir must still leave a cache behind for the next process.
+    if cache_path is not None and not cache_path.exists():
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(ref, indent=2))
+    return ref
 
 
 def shared_constants(
