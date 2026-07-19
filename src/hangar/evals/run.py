@@ -49,7 +49,11 @@ from hangar.evals.drivers.base import MCPServerSpec
 from hangar.evals.drivers.claude_cli import ClaudeCliDriver
 from hangar.evals.drivers.claude_sdk import ClaudeAgentSDKDriver
 from hangar.evals.drivers.opencode import OpenCodeDriver
-from hangar.evals.drivers.sandbox import make_workspace
+from hangar.evals.drivers.sandbox import (
+    OPENCODE_IMAGE,
+    ContainerSandbox,
+    make_workspace,
+)
 from hangar.evals.environment import capture_environment
 from hangar.evals.omd_service import OmdHttpService
 from hangar.evals.oracle import (
@@ -363,12 +367,6 @@ def run_matrix(config: RunConfig, stamp: str) -> list[CellSummary]:
         raise ValueError(f"unknown harness(es): {unknown}. choose from {list(HARNESSES)}")
     if config.case not in CASES:
         raise ValueError(f"unknown case: {config.case}. choose from {list(CASES)}")
-    if config.sandbox == "container":
-        unsupported = [h for h in config.harnesses if h != "claude"]
-        if unsupported:
-            raise ValueError(
-                f"sandbox='container' supports only the claude anchor for now "
-                f"(Step 14a); the {unsupported} arm lands in Step 14b")
 
     case = CASES[config.case]
     results_dir = Path(config.results_dir).resolve()
@@ -392,10 +390,16 @@ def run_matrix(config: RunConfig, stamp: str) -> list[CellSummary]:
         for harness in config.harnesses:
             factory, default_model = HARNESSES[harness]
             model = config.model or default_model
-            # Sandboxed, the anchor swaps to the in-container CLI driver
-            # (Step 14a) — same AgentResult shape, different mechanism.
-            driver = (ClaudeCliDriver() if config.sandbox == "container"
-                      else factory())
+            # Sandboxed, each arm swaps to its containerized mechanism —
+            # anchor: the in-container CLI driver (14a); opencode: the same
+            # driver docker-wrapped with the local-arm image and NO env
+            # passthrough (14b). Same AgentResult shape either way.
+            if config.sandbox == "container":
+                driver = (ClaudeCliDriver() if harness == "claude"
+                          else OpenCodeDriver(sandbox=ContainerSandbox(
+                              image=OPENCODE_IMAGE, env_passthrough=())))
+            else:
+                driver = factory()
             cell_records: list[dict] = []
             for seed in range(config.seeds):
                 record = run_cell(case, driver, harness, model, seed,

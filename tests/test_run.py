@@ -273,14 +273,6 @@ def test_run_cell_sandboxed_routes_driver_to_workspace(tmp_path, monkeypatch):
     assert rec["telemetry"]["sandbox"] == "container"
 
 
-def test_run_matrix_sandbox_is_anchor_only_until_14b(tmp_path):
-    cfg = RunConfig(case="paraboloid", harnesses=("opencode",), seeds=1,
-                    results_dir=str(tmp_path),
-                    omd_transport="http", sandbox="container")
-    with pytest.raises(ValueError, match="14b"):
-        run_matrix(cfg, stamp="20260718T000000Z")
-
-
 def test_run_matrix_sandboxed_claude_uses_cli_driver(tmp_path, monkeypatch):
     from hangar.evals.drivers.claude_cli import ClaudeCliDriver
 
@@ -297,6 +289,32 @@ def test_run_matrix_sandboxed_claude_uses_cli_driver(tmp_path, monkeypatch):
                     omd_transport="http", sandbox="container")
     run_matrix(cfg, stamp="20260718T000000Z")
     assert isinstance(seen["driver"], ClaudeCliDriver)
+
+
+def test_run_matrix_sandboxed_opencode_gets_the_local_arm_sandbox(tmp_path, monkeypatch):
+    # Step 14b: opencode × container is no longer an error — the driver is the
+    # ordinary OpenCodeDriver wrapped in the local-arm sandbox: the pinned
+    # opencode image, and NO env passthrough (the local arm carries no token).
+    from hangar.evals.drivers.opencode import OpenCodeDriver
+    from hangar.evals.drivers.sandbox import OPENCODE_IMAGE
+
+    seen = {}
+
+    def fake_run_cell(case, driver, harness, model, seed, results_dir, max_turns,
+                      omd_transport="stdio", sandbox="none"):
+        seen["driver"] = driver
+        return _fake_record(seed, passed=True)
+
+    monkeypatch.setattr(run_mod, "run_cell", fake_run_cell)
+    cfg = RunConfig(case="paraboloid", harnesses=("opencode",), seeds=1,
+                    results_dir=str(tmp_path),
+                    omd_transport="http", sandbox="container")
+    run_matrix(cfg, stamp="20260719T000000Z")
+    driver = seen["driver"]
+    assert isinstance(driver, OpenCodeDriver)
+    assert driver.sandbox is not None
+    assert driver.sandbox.image == OPENCODE_IMAGE
+    assert driver.sandbox.env_passthrough == ()
 
 
 def test_claude_anchor_model_is_pinned():

@@ -94,6 +94,33 @@ def test_render_config_remote_mcp_is_url_only():
     assert all(v is False for v in cfg["tools"].values())
 
 
+def test_render_config_sandboxed_relaxes_tools_and_containerizes_urls():
+    # Step 14b: sandboxed, the guard flips from tool-starvation to
+    # reachability — ONLY the contamination vectors stay disabled (file/bash
+    # built-ins return at their defaults, scoped by the container) — and the
+    # Ollama endpoint is rewritten to host.docker.internal. No host path, no
+    # OMD_*, no sys.executable in the serialized config.
+    spec = MCPServerSpec.omd_http("http://host.docker.internal:8123/mcp")
+    cfg = render_opencode_config(spec, "qwen3:8b", sandboxed=True)
+    assert cfg["tools"] == {"webfetch": False, "websearch": False}
+    assert (cfg["provider"]["ollama"]["options"]["baseURL"]
+            == "http://host.docker.internal:11434/v1")
+    assert cfg["mcp"]["omd"] == {"type": "remote", "enabled": True,
+                                 "url": "http://host.docker.internal:8123/mcp"}
+    dumped = json.dumps(cfg)
+    assert "OMD_" not in dumped
+    assert sys.executable not in dumped
+    assert "localhost" not in dumped and "127.0.0.1" not in dumped
+
+
+def test_render_config_sandboxed_refuses_stdio(tmp_path):
+    # A stdio omd child inside the container would share the agent's
+    # privilege domain — the grading evidence would be forgeable.
+    with pytest.raises(ValueError, match="http"):
+        render_opencode_config(MCPServerSpec.omd(tmp_path), "qwen3:8b",
+                               sandboxed=True)
+
+
 def test_render_config_custom_provider_and_url(tmp_path):
     spec = MCPServerSpec.omd(tmp_path)
     cfg = render_opencode_config(
@@ -122,6 +149,30 @@ def test_build_argv_uses_json_format(tmp_path):
         "--format", "json",
         "do the task",
     ]
+
+
+def test_build_argv_sandboxed_wraps_in_docker_with_no_env(tmp_path):
+    # Step 14b: the docker wrapper mounts ONLY the workspace, passes NO env
+    # vars (the local arm has no token), and the inner argv sees container
+    # paths only — --dir is /workspace, and the host path appears solely in
+    # the mount spec.
+    from hangar.evals.drivers.sandbox import (
+        CONTAINER_WORKSPACE,
+        OPENCODE_IMAGE,
+        ContainerSandbox,
+    )
+
+    driver = OpenCodeDriver(sandbox=ContainerSandbox(
+        image=OPENCODE_IMAGE, env_passthrough=()))
+    argv = driver.build_argv("do the task", tmp_path, "qwen3:8b")
+    assert argv[:3] == ["docker", "run", "--rm"]
+    assert "-e" not in argv
+    mounts = [argv[i + 1] for i, a in enumerate(argv) if a == "-v"]
+    assert mounts == [f"{tmp_path.resolve()}:{CONTAINER_WORKSPACE}"]
+    inner = argv[argv.index(OPENCODE_IMAGE) + 1:]
+    assert inner[:4] == ["opencode", "run", "-m", "ollama/qwen3:8b"]
+    assert inner[inner.index("--dir") + 1] == CONTAINER_WORKSPACE
+    assert str(tmp_path) not in " ".join(inner)
 
 
 # ---------------------------------------------------------------------------

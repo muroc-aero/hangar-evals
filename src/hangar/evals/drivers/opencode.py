@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hangar.evals.drivers.base import AgentResult, MCPServerSpec
+from hangar.evals.drivers.sandbox import CONTAINER_WORKSPACE, ContainerSandbox
 from hangar.evals.trace import ToolCall, parse_omd_error_code
 
 _CONFIG_SCHEMA = "https://opencode.ai/config.json"
@@ -119,18 +120,33 @@ def parse_opencode_events(stdout: str, server: str) -> OpenCodeRun:
     return OpenCodeRun("\n".join(text_parts), calls, cost, turns, token_sums or None)
 
 
-# OpenCode's built-in tools. We disable ALL of them so the local agent is
-# restricted to the omd MCP tools only — matching the Claude driver's
-# disallowed_tools, so both harnesses face the same MCP-only surface. Without
-# this, OpenCode hands the model `write`/`bash`/etc. and an unrestricted local
-# agent has more capability than the anchor (verified: qwen3:8b used `write`
-# 12x on the paraboloid task). Disabling via `tools` removes them from the
-# offered set (confirmed by spike) rather than merely denying at call time.
-# Version-fragile: a NEW built-in OpenCode adds would leak until listed here.
+# OpenCode's built-in tools. UNSANDBOXED we disable ALL of them so the local
+# agent is restricted to the omd MCP tools only — matching the Claude driver's
+# interim blocklist, so both harnesses face the same MCP-only surface (its cwd
+# is a host directory; verified: qwen3:8b used `write` 12x on the paraboloid
+# task). Disabling via `tools` removes them from the offered set (confirmed by
+# spike) rather than merely denying at call time. Version-fragile: a NEW
+# built-in OpenCode adds would leak until listed here.
 BUILTIN_TOOLS = [
     "bash", "edit", "write", "read", "glob", "grep", "list",
     "patch", "webfetch", "websearch", "task", "todowrite", "todoread",
 ]
+
+# SANDBOXED (Step 14b) the guard flips from tool-starvation to reachability:
+# file/bash built-ins come back at their defaults — they only reach the
+# mounted workspace — and ONLY the vectors a filesystem sandbox cannot stop
+# stay disabled (the OpenCode spellings of the anchor's _CONTAMINATION_TOOLS).
+CONTAMINATION_BUILTINS = ["webfetch", "websearch"]
+
+
+def _containerize_url(url: str) -> str:
+    """Rewrite a host-loopback URL for in-container use.
+
+    colima forwards ``host.docker.internal`` to the host loopback (verified
+    live, Step 14a recon), so Ollama's bind never changes.
+    """
+    return (url.replace("localhost", "host.docker.internal")
+               .replace("127.0.0.1", "host.docker.internal"))
 
 
 def render_opencode_config(
@@ -138,6 +154,7 @@ def render_opencode_config(
     model: str,
     provider: str = "ollama",
     base_url: str = "http://localhost:11434/v1",
+    sandboxed: bool = False,
 ) -> dict:
     """Build the ``opencode.json`` dict for one run.
 
@@ -147,8 +164,17 @@ def render_opencode_config(
     ``MCPServerSpec`` into OpenCode's schema — ``type: "local"`` (a single
     ``command`` list plus ``environment``) for stdio, ``type: "remote"``
     (url-only, Step 13) for a host-side HTTP omd service. ``tools`` disables
-    OpenCode's built-ins so only the omd MCP tools remain (the MCP-only track).
+    OpenCode's built-ins: all of them unsandboxed (the MCP-only track), only
+    the contamination vectors sandboxed (Step 14b — the container scopes the
+    rest).
+
+    Sandboxed, a stdio spec is refused outright: it would need host paths
+    inside the container AND put omd in the agent's privilege domain, making
+    the provenance DB — the PRIMARY grading evidence — forgeable.
     """
+    if sandboxed and mcp.transport != "http":
+        raise ValueError(
+            "sandboxed opencode requires an http MCPServerSpec (omd_transport='http')")
     if mcp.transport == "http":
         mcp_entry = {"type": "remote", "enabled": True, "url": mcp.url}
     else:
@@ -158,33 +184,44 @@ def render_opencode_config(
             "command": [mcp.command, *mcp.args],
             "environment": dict(mcp.env),
         }
+    disabled = CONTAMINATION_BUILTINS if sandboxed else BUILTIN_TOOLS
     return {
         "$schema": _CONFIG_SCHEMA,
         "provider": {
             provider: {
                 "npm": "@ai-sdk/openai-compatible",
                 "name": f"{provider} (local)",
-                "options": {"baseURL": base_url},
+                "options": {"baseURL": _containerize_url(base_url) if sandboxed else base_url},
                 "models": {model: {"tools": True}},
             },
         },
-        "tools": {t: False for t in BUILTIN_TOOLS},
+        "tools": {t: False for t in disabled},
         "mcp": {mcp.name: mcp_entry},
     }
 
 
 class OpenCodeDriver:
-    """Drive a local model through the OpenCode CLI against an MCP server."""
+    """Drive a local model through the OpenCode CLI against an MCP server.
+
+    With ``sandbox`` set (Step 14b) the same CLI runs inside the container:
+    ``data_root`` is then the scratch WORKSPACE (the only mounted path — the
+    runner passes it; omd state stays host-only), the argv is docker-wrapped,
+    and the rendered config points at ``host.docker.internal`` for both the
+    Ollama endpoint and the omd url. No secrets cross: the local arm passes
+    no env vars at all.
+    """
 
     def __init__(
         self,
         base_url: str = "http://localhost:11434/v1",
         provider: str = "ollama",
         binary: str = "opencode",
+        sandbox: ContainerSandbox | None = None,
     ):
         self.base_url = base_url
         self.provider = provider
         self.binary = binary
+        self.sandbox = sandbox
 
     def run(
         self,
@@ -197,7 +234,9 @@ class OpenCodeDriver:
         data_root = Path(data_root)
         data_root.mkdir(parents=True, exist_ok=True)
 
-        config = render_opencode_config(mcp, model, self.provider, self.base_url)
+        config = render_opencode_config(
+            mcp, model, self.provider, self.base_url,
+            sandboxed=self.sandbox is not None)
         (data_root / "opencode.json").write_text(json.dumps(config, indent=2))
 
         argv = self.build_argv(prompt, data_root, model)
@@ -229,13 +268,21 @@ class OpenCodeDriver:
         )
 
     def build_argv(self, prompt: str, data_root: Path, model: str) -> list[str]:
-        """The ``opencode run`` invocation. Separate for testability."""
-        return [
+        """The ``opencode run`` invocation. Separate for testability.
+
+        Sandboxed, the inner argv sees only container paths (``--dir
+        /workspace``, where the workspace — holding ``opencode.json`` — is
+        mounted) and gets docker-wrapped with no env passthrough.
+        """
+        inner = [
             self.binary,
             "run",
             "-m", f"{self.provider}/{model}",
-            "--dir", str(data_root),
+            "--dir", CONTAINER_WORKSPACE if self.sandbox else str(data_root),
             "--dangerously-skip-permissions",  # auto-approve MCP tool calls headlessly
             "--format", "json",                 # JSONL events: report + tool trace
             prompt,
         ]
+        if self.sandbox:
+            return self.sandbox.wrap_argv(inner, data_root)
+        return inner

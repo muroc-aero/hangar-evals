@@ -18,6 +18,7 @@ from hangar.evals.drivers import sandbox as sandbox_mod
 from hangar.evals.drivers.sandbox import (
     ANCHOR_IMAGE,
     CONTAINER_WORKSPACE,
+    OPENCODE_IMAGE,
     ContainerSandbox,
     make_workspace,
 )
@@ -26,10 +27,10 @@ from hangar.evals.hangar_ref import resolve_hangar_repo
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
-def _docker_image_present() -> bool:
+def _docker_image_present(image: str = ANCHOR_IMAGE) -> bool:
     try:
         return subprocess.run(
-            ["docker", "image", "inspect", ANCHOR_IMAGE],
+            ["docker", "image", "inspect", image],
             capture_output=True, timeout=30,
         ).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
@@ -141,3 +142,49 @@ def test_container_claude_cli_version_matches_pin(tmp_path):
     proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
     version = ANCHOR_IMAGE.rsplit("-", 1)[-1]
     assert version in proc.stdout
+
+
+needs_opencode_image = pytest.mark.skipif(
+    not _docker_image_present(OPENCODE_IMAGE),
+    reason=f"docker unavailable or {OPENCODE_IMAGE} not built",
+)
+
+
+@pytest.mark.slow
+@needs_opencode_image
+def test_container_opencode_version_matches_pin(tmp_path):
+    # The local-arm image (Step 14b): pinned CLI present, no env passthrough.
+    sandbox = ContainerSandbox(image=OPENCODE_IMAGE, env_passthrough=())
+    argv = sandbox.wrap_argv(["opencode", "--version"], tmp_path)
+    assert "-e" not in argv
+    proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+    version = OPENCODE_IMAGE.rsplit("-", 1)[-1]
+    assert version in proc.stdout
+
+
+@pytest.mark.slow
+@needs_opencode_image
+def test_opencode_container_cannot_see_either_repo_but_sees_workspace():
+    # The 14a isolation probes, re-run against the local-arm image.
+    import shutil
+
+    ws = make_workspace("isolation_test_oc")
+    (ws / "probe.txt").write_text("probe")
+    hangar_file = resolve_hangar_repo() / "packages/omd/examples/agent_eval/eval_lane_c.py"
+    assert hangar_file.exists()
+    script = (
+        f"cat {hangar_file} 2>/dev/null && echo HANGAR_LEAKED; "
+        f"ls {_REPO_ROOT}/results 2>/dev/null && echo RESULTS_LEAKED; "
+        f"cat /workspace/probe.txt; "
+        f"echo written-from-container > /workspace/out.txt"
+    )
+    sandbox = ContainerSandbox(image=OPENCODE_IMAGE, env_passthrough=())
+    argv = sandbox.wrap_argv(["sh", "-c", script], ws)
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=120)
+        assert "HANGAR_LEAKED" not in proc.stdout
+        assert "RESULTS_LEAKED" not in proc.stdout
+        assert "probe" in proc.stdout
+        assert (ws / "out.txt").read_text().strip() == "written-from-container"
+    finally:
+        shutil.rmtree(ws, ignore_errors=True)
