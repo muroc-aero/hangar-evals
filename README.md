@@ -84,5 +84,11 @@ $HAVE have --db muroc.db report <study_id>
 An eval that runs cleanly but fails its grade is a *successful* job with a
 failing CHECK verdict (`min_pass_rate` in the study's `acceptance:` block);
 only harness crashes and malformed payloads fail the job itself. See the
-header of `examples/lane_c_eval.yaml` for prerequisites and the sandboxed
-(`omd_transport=http`, `sandbox=container`) variant.
+header of `examples/lane_c_eval.yaml` for prerequisites.
+
+For the fully sandboxed run — every agent in a container, both arms —
+submit `examples/lane_c_eval_sandboxed.yaml` instead: 24 cells, the 12-case
+suite x {claude anchor under local Claude Code auth, `gemma4:26b-mlx` via
+OpenCode/Ollama}, each with `omd_transport: http` + `sandbox: container`.
+Its header lists the extra prerequisites (colima up, sandbox images built,
+`CLAUDE_CODE_OAUTH_TOKEN` exported, gemma pulled).

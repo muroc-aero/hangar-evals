@@ -27,7 +27,9 @@ from hangar.evals.have_bridge import (
 )
 from hangar.evals.run import HARNESSES
 
-EXAMPLE_YAML = Path(__file__).parent.parent / "examples" / "lane_c_eval.yaml"
+EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
+EXAMPLE_YAML = EXAMPLES_DIR / "lane_c_eval.yaml"
+SANDBOXED_YAML = EXAMPLES_DIR / "lane_c_eval_sandboxed.yaml"
 
 
 def _summary_obj(**kw) -> SimpleNamespace:
@@ -235,15 +237,37 @@ def test_make_worker_rejects_unknown_opt():
 
 # --- example StudyRequest ------------------------------------------------------
 
-def test_example_study_covers_the_full_suite():
-    spec = yaml.safe_load(EXAMPLE_YAML.read_text())
+@pytest.mark.parametrize("path", [EXAMPLE_YAML, SANDBOXED_YAML],
+                         ids=["anchor", "sandboxed"])
+def test_example_study_covers_the_full_suite(path):
+    spec = yaml.safe_load(path.read_text())
     assert spec["baseline"]["template"].startswith("evals/")
     cases = spec["cases"]
     ids = [c["case_id"] for c in cases]
     assert len(ids) == len(set(ids))
-    eval_cases = {c["overrides"]["case"] for c in cases}
-    assert eval_cases == set(CASES)  # every suite case, nothing else
+    for harness in {c["overrides"]["harness"] for c in cases}:
+        arm_cases = {c["overrides"]["case"] for c in cases
+                     if c["overrides"]["harness"] == harness}
+        assert arm_cases == set(CASES)  # every suite case per arm, nothing else
     for c in cases:
         ov = c["overrides"]
         assert ov["harness"] in HARNESSES
         assert set(ov) <= have_bridge._CELL_KEYS
+
+
+def test_sandboxed_study_runs_both_arms_in_containers():
+    spec = yaml.safe_load(SANDBOXED_YAML.read_text())
+    cases = spec["cases"]
+    assert len(cases) == 2 * len(CASES)  # claude + gemma over the full suite
+    assert {c["overrides"]["harness"] for c in cases} == {"claude", "opencode"}
+    executor = LaneCEvalExecutor()
+    for c in cases:
+        ov = c["overrides"]
+        assert ov["sandbox"] == "container"
+        assert ov["omd_transport"] == "http"
+        if ov["harness"] == "opencode":
+            assert ov["model"] == "gemma4:26b-mlx"
+        # every cell must materialize a valid RunConfig (this is exactly the
+        # path execute() takes, so a bad cell here would be a permanent fail)
+        config = executor._config(ov)
+        assert config.sandbox == "container"
