@@ -97,3 +97,30 @@ def lane_a_reference(
             f"(interpreter {sys.executable}):\n{proc.stderr}"
         )
     return json.loads(proc.stdout.strip().splitlines()[-1])
+
+
+def shared_constants(
+    example: str, names: tuple[str, ...], hangar_repo: Path | None = None
+) -> dict:
+    """Read constants from ``<example>.shared`` — the same subprocess seam as
+    ``lane_a_reference`` (and for the same reason: ``shared.py`` modules
+    collide on ``sys.path``). Used by the Step-15 task-validity baselines,
+    whose scripted tool sequences need each example's physical inputs
+    (``MISSION``, ``WING``, ...) without hardcoding them here."""
+    repo = hangar_repo or resolve_hangar_repo()
+    examples = repo / EXAMPLES_SUBDIR
+    code = (
+        "import json, sys\n"
+        f"sys.path.insert(0, {str(examples)!r})\n"
+        f"from {example} import shared\n"
+        f"print(json.dumps({{n: getattr(shared, n) for n in {list(names)!r}}},"
+        " default=str))\n"
+    )
+    proc = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, cwd=str(repo),
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"shared constants {example}.shared {names} failed:\n{proc.stderr}"
+        )
+    return json.loads(proc.stdout.strip().splitlines()[-1])

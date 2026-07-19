@@ -26,22 +26,52 @@ The fenced-JSON self-report is scored separately as *reporting fidelity*
 produced? Honest self-reporting is a deployment-relevant trait, but it is a
 SECONDARY signal — correctness of the work comes from here.
 
+Evidence layers (Step 15): raw ``run_cases`` final data holds OpenMDAO
+variable names (``paraboloid.f_xy``, promoted ``x``/``y``), but most suite
+metrics are SUMMARY-level quantities omd computes at run time
+(``fuel_burn_kg`` integrates phases; ``CL`` reads a solver point) that never
+appear as recorder variables. Those scalars are snapshotted into the
+assessment metadata (the-hangar widened the snapshot to every scalar summary
+key for exactly this), so the oracle reads both layers: assessment scalars —
+plus per-component summaries flattened to ``<comp_id>.<key>`` — overlaying
+the raw final data. Composite metrics resolve by unique dotted-suffix match
+because the agent chooses component ids.
+
 Scope note: only ``analysis``/``optimize`` runs are mapped today (all current
 cases). Polar/study runs record differently; extend ``MODE_BY_MODULE`` and the
-selection when a T1+ case needs them.
+selection when a T2+ case needs them.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from hangar.evals.scoring import Metric
 
 # Metric.lane_a_module -> the omd run "mode" recorded in assessment metadata.
-MODE_BY_MODULE = {"analysis": "analysis", "optimization": "optimize"}
+# Every T1/T4 module is an analysis run; only the paraboloid optimization
+# tasks the optimizer. Explicit (not defaulted) so an unmapped module is a
+# loud KeyError at grading time, not a silently wrong grade.
+MODE_BY_MODULE = {
+    "analysis": "analysis",
+    "optimization": "optimize",
+    "aero_analysis": "analysis",
+    "aerostruct_analysis": "analysis",
+    "basic_mission": "analysis",
+    "full_mission": "analysis",
+    "hybrid_mission": "analysis",
+    "wing_mission": "analysis",
+    "coupled_mission": "analysis",
+    "direct_coupled_mission": "analysis",
+    "design_analysis": "analysis",
+    "sizing": "analysis",
+}
+
+# Assessment metadata keys that are run bookkeeping, not summary metrics.
+_ASSESS_BOOKKEEPING = {"status", "mode", "case_count"}
 
 
 @dataclass(frozen=True)
@@ -54,6 +84,9 @@ class EffectRun:
     assess_status: str | None   # e.g. "completed", "converged"
     started_at: str             # execute activity start (ISO string; sortable)
     final_values: dict          # last run_cases 'final' row for this run
+    # Summary scalars snapshotted into the assessment metadata, with composite
+    # per-component summaries flattened to "<comp_id>.<key>" (Step 15).
+    assess_values: dict = field(default_factory=dict)
 
 
 def read_effect_runs(db_path: Path) -> list[EffectRun]:
@@ -102,6 +135,7 @@ def read_effect_runs(db_path: Path) -> list[EffectRun]:
                     assess_status=meta.get("status"),
                     started_at=a["started_at"],
                     final_values=_parse_json(final["data"]) if final else {},
+                    assess_values=_assess_values(meta),
                 ))
             return runs
         except sqlite3.OperationalError:
@@ -120,6 +154,33 @@ def _parse_json(raw: str | None) -> dict:
     return obj if isinstance(obj, dict) else {}
 
 
+def _is_scalar(v) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _assess_values(meta: dict) -> dict:
+    """Summary metrics from assessment metadata: top-level scalars plus
+    per-component summaries flattened to ``<comp_id>.<key>``.
+
+    Slots are deliberately NOT flattened — no current metric reads them, and
+    a slot provider's internal ``CL`` would collide with a component's in the
+    suffix search.
+    """
+    values = {
+        k: v for k, v in meta.items()
+        if _is_scalar(v) and k not in _ASSESS_BOOKKEEPING
+    }
+    components = meta.get("components")
+    if isinstance(components, dict):
+        for comp_id, comp in components.items():
+            if not isinstance(comp, dict):
+                continue
+            for k, v in comp.items():
+                if _is_scalar(v):
+                    values[f"{comp_id}.{k}"] = v
+    return values
+
+
 def select_run(runs: list[EffectRun], mode: str) -> EffectRun | None:
     """The LAST successful run of ``mode`` — the agent's final answer-by-action."""
     candidates = [r for r in runs if r.executed_ok and r.mode == mode]
@@ -131,17 +192,34 @@ def effect_values(
 ) -> dict[str, float | None]:
     """Per-metric values from the selected runs (``None`` = nothing to grade).
 
-    The value key in ``run_cases`` final data is ``Metric.effect_key``,
-    falling back to ``lane_a_key`` (they coincide for every current case).
-    Non-numeric values map to ``None`` so the comparator FAILs them.
+    The value key is ``Metric.effect_key``, falling back to ``lane_a_key``.
+    Lookup order per metric (Step 15): exact key in the assessment summary
+    scalars (the vocabulary Lane A shares), exact key in the raw recorder
+    final data (paraboloid's promoted ``x``/``y``/``f_xy``), then a unique
+    dotted-suffix match among the flattened ``<comp_id>.<key>`` component
+    values — composites only, where the agent named the components. An
+    ambiguous suffix (two components exposing the same key) grades ``None``
+    rather than guessing. Non-numeric values map to ``None`` so the
+    comparator FAILs them.
     """
     out: dict[str, float | None] = {}
     for m in metrics:
         run = select_run(runs, MODE_BY_MODULE[m.lane_a_module])
-        got = run.final_values.get(m.effect_key or m.lane_a_key) if run else None
-        numeric = isinstance(got, (int, float)) and not isinstance(got, bool)
-        out[m.key] = float(got) if numeric else None
+        got = _lookup(run, m.effect_key or m.lane_a_key) if run else None
+        out[m.key] = float(got) if _is_scalar(got) else None
     return out
+
+
+def _lookup(run: EffectRun, key: str):
+    if key in run.assess_values:
+        return run.assess_values[key]
+    if key in run.final_values:
+        return run.final_values[key]
+    suffix = [
+        v for k, v in run.assess_values.items()
+        if "." in k and k.rsplit(".", 1)[1] == key
+    ]
+    return suffix[0] if len(suffix) == 1 else None
 
 
 def oracle_ambiguity(metrics: list[Metric], runs: list[EffectRun]) -> int:

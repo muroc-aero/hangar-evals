@@ -36,10 +36,11 @@ REFS = {
 
 
 def _run(run_id="r1", mode="optimize", ok=True, at="2026-01-01T00:00:00",
-         values=None):
+         values=None, assess=None):
     return EffectRun(run_id=run_id, mode=mode, executed_ok=ok,
                      assess_status="completed", started_at=at,
-                     final_values=values if values is not None else {})
+                     final_values=values if values is not None else {},
+                     assess_values=assess if assess is not None else {})
 
 
 # --- reading the fixture ---------------------------------------------------
@@ -157,6 +158,73 @@ def test_report_fidelity_undefined_without_effects():
     effects = effect_values(METRICS, [])
     report = {"metrics": {"analysis_f_xy": 39.0}}
     assert report_matches_effects(METRICS, report, effects) is None
+
+
+# --- Step 15: summary metrics via the assessment overlay ---------------------
+
+
+def test_summary_scalars_come_from_assessment_not_recorder():
+    # OAS CL/CD are summary quantities — absent from the raw recorder data
+    # (which holds absolute OpenMDAO names), present as assessment scalars.
+    metrics = CASES["oas_aero_rect"].metrics
+    runs = [_run("r1", mode="analysis",
+                 values={"wing.widths": 1.0},          # raw recorder noise
+                 assess={"CL": 0.5, "CD": 0.02})]
+    assert effect_values(metrics, runs) == {"CL": 0.5, "CD": 0.02}
+
+
+def test_assessment_value_wins_over_raw_recorder_key():
+    metrics = CASES["oas_aero_rect"].metrics
+    runs = [_run("r1", mode="analysis",
+                 values={"CL": 999.0, "CD": 999.0},    # stale/colliding raw key
+                 assess={"CL": 0.5, "CD": 0.02})]
+    assert effect_values(metrics, runs)["CL"] == 0.5
+
+
+def test_composite_metrics_resolve_by_unique_suffix():
+    # oas_ocp_combined: values live under agent-named components, flattened
+    # to "<comp_id>.<key>". wing_CL has effect_key="CL"; the OCP trio match
+    # by their own names. Component ids here differ from the scripted ones —
+    # the agent picks them, and grading must not care.
+    metrics = CASES["oas_ocp_combined"].metrics
+    assess = {"aero.CL": 0.6, "aero.CD": 0.03,
+              "mymission.fuel_burn_kg": 100.0, "mymission.OEW_kg": 2000.0,
+              "mymission.MTOW_kg": 3970.0}
+    runs = [_run("r1", mode="analysis", assess=assess)]
+    assert effect_values(metrics, runs) == {
+        "wing_CL": 0.6, "wing_CD": 0.03, "fuel_burn_kg": 100.0,
+        "OEW_kg": 2000.0, "MTOW_kg": 3970.0,
+    }
+
+
+def test_ambiguous_suffix_grades_none_not_a_guess():
+    metrics = CASES["oas_ocp_combined"].metrics
+    assess = {"wing_a.CL": 0.6, "wing_b.CL": 0.7}      # two components expose CL
+    runs = [_run("r1", mode="analysis", assess=assess)]
+    assert effect_values(metrics, runs)["wing_CL"] is None
+
+
+def test_every_case_module_has_a_mode_mapping():
+    # A module missing from MODE_BY_MODULE is a KeyError at grading time —
+    # keep the table total over the case suite.
+    from hangar.evals.oracle import MODE_BY_MODULE
+    for case in CASES.values():
+        for m in case.metrics:
+            assert m.lane_a_module in MODE_BY_MODULE, (case.name, m.lane_a_module)
+
+
+def test_assess_values_extraction_flattens_components_and_skips_bookkeeping():
+    from hangar.evals.oracle import _assess_values
+    meta = {
+        "status": "completed", "mode": "analysis", "case_count": 3,  # bookkeeping
+        "fuel_burn_kg": 100.0, "converged": 1.0,                     # scalars
+        "evt_mode": "sizing", "flag": True, "profile": [1, 2],       # non-metrics
+        "components": {"wing": {"CL": 0.5, "note": "x"}, "bad": 3.0},
+        "slots": {"drag": {"CL": 0.9}},                              # never read
+    }
+    assert _assess_values(meta) == {
+        "fuel_burn_kg": 100.0, "converged": 1.0, "wing.CL": 0.5,
+    }
 
 
 # --- reporting-required relaxation -------------------------------------------

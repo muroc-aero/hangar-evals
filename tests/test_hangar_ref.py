@@ -39,3 +39,17 @@ def test_hangar_repo_without_examples_raises(monkeypatch, tmp_path):
     monkeypatch.setenv("HANGAR_REPO", str(tmp_path))
     with pytest.raises(FileNotFoundError, match="does not look like the-hangar"):
         resolve_hangar_repo()
+
+
+def test_shared_constants_reads_example_shared_module():
+    from hangar.evals.hangar_ref import shared_constants
+
+    sh = shared_constants("paraboloid", ("ANALYSIS_X", "ANALYSIS_Y"))
+    assert sh == {"ANALYSIS_X": 1.0, "ANALYSIS_Y": 2.0}
+
+
+def test_shared_constants_unknown_name_raises_with_stderr():
+    from hangar.evals.hangar_ref import shared_constants
+
+    with pytest.raises(RuntimeError, match="NOPE"):
+        shared_constants("paraboloid", ("NOPE",))
