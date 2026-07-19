@@ -22,6 +22,9 @@ CONTAINER_WORKSPACE = "/workspace"
 # node:22-slim + @anthropic-ai/claude-code pinned to the host CLI version
 # (containers/anchor.Dockerfile). Recorded per-record so image drift is visible.
 ANCHOR_IMAGE = "hangar-harness:anchor-2.1.212"
+# node:22-slim + opencode-ai pinned to the host brew version
+# (containers/opencode.Dockerfile) — the Step 14b local-LLM arm.
+OPENCODE_IMAGE = "hangar-harness:opencode-1.17.5"
 
 
 def make_workspace(prefix: str) -> Path:

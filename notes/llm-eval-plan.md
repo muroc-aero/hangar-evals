@@ -71,8 +71,8 @@ beyond are the post-ladder refinements.
 | **11** | **Effect-based grading + oracle self-test** — grade omd side effects (`run_cases`), demote the fenced-JSON self-report | `oracle.py` + `run.py` rewiring + ABC tests | ✅ **DONE** (spec §4c, PR #11) |
 | **12** | **Reporting rigor** — pass@1/pass@k/**pass^k** in the aggregate; pin environment versions in the manifest (incl. explicit anchor model); surface token counts | `aggregate.py`, `run.py` manifest, `environment.py` | ✅ **DONE** (spec §4d, PR #12) |
 | 13 | **omd-over-HTTP decoupling** — omd as a host-side HTTP service; parity test stdio↔HTTP (extracted from the old sandbox Task 1) | `MCPServerSpec` HTTP variant + `OmdHttpService` launcher + parity test | ✅ **DONE** (spec §4e, PR #13) |
-| 14 | **Filesystem sandbox — container-per-run (colima)** — clean workspace OUTSIDE this repo; relax the interim tool blocklists (two commits: **14a anchor under local Claude Code auth**, **14b OpenCode/local-LLM arm**) | container image + `drivers/sandbox.py` + `drivers/claude_cli.py` + isolation test | **14a ✅ DONE** (spec §4f, PR #14; live sandboxed effect-graded PASS under local Claude Code auth); 14b after (spec §4b) |
-| 15 | **Suite expansion** (T1 + T3 first) + per-case **task-validity** check (a scripted tool sequence reproduces Lane A) | new cases + scripted-baseline proofs | ⏭ **T1+T4 IMPLEMENTED 2026-07-18, awaiting review** (spec §4g — every effect-gradable example landed in one shape; live proof: **12/12 scripted baselines VALID, all metrics exact PASS**); **T3 trap/recovery cases split to 15b** (different grading design) |
+| 14 | **Filesystem sandbox — container-per-run (colima)** — clean workspace OUTSIDE this repo; relax the interim tool blocklists (two commits: **14a anchor under local Claude Code auth**, **14b OpenCode/local-LLM arm**) | container image + `drivers/sandbox.py` + `drivers/claude_cli.py` + isolation test | **14a ✅ DONE** (spec §4f, PR #14; live sandboxed effect-graded PASS under local Claude Code auth); **14b IMPLEMENTED 2026-07-19, awaiting review** (spec §4h — OpenCode arm in-container, tools map relaxed; live: sandboxed gemma recorded executed omd runs, `analysis_f_xy` exact PASS) |
+| 15 | **Suite expansion** (T1 + T3 first) + per-case **task-validity** check (a scripted tool sequence reproduces Lane A) | new cases + scripted-baseline proofs | **T1+T4 ✅ DONE** (spec §4g, PR #15 + the-hangar PR #101; live proof: **12/12 scripted baselines VALID, all metrics exact PASS**); **T3 trap/recovery cases split to 15b** (different grading design) |
 | 16 | **OpenHands arm + deconfounding cells** — same local model through both harnesses; a Claude-via-OpenCode cell to split model vs harness ceiling | `drivers/openhands.py` + configs | todo |
 | 17 | **Live run progress** — watch seeds/turns/tokens during a run (§12) | streaming driver + driver-agnostic progress callback | todo |
 
@@ -933,7 +933,7 @@ anchor arm, local auth (Step 14a)`. User reviews/merges. (Prereqs: Steps
 
 ---
 
-## 4g. Step 15 spec — Lane-C suite expansion + task-validity baselines (T1+T4 IMPLEMENTED 2026-07-18, awaiting review/merge)
+## 4g. Step 15 spec — Lane-C suite expansion + task-validity baselines (T1+T4 ✅ DONE, PR #15)
 
 **Purpose.** Convert the proven single-case capability (paraboloid, sandboxed,
 local Claude Code auth) into the actual v1 goal: **the Lane-C examples,
@@ -1017,6 +1017,130 @@ no polar/study run modes in the oracle.
 > option exists; nothing sets it — candidate upstream follow-up),
 > `ocp_three_tool` is impractical for multi-seed sweeps; keep it in the
 > suite for validity/anchor use, but budget it separately.
+
+---
+
+## 4h. Step 14b spec — container sandbox: the OpenCode / local-LLM arm (drafted 2026-07-19)
+
+**Purpose.** Put the second harness in the container: OpenCode driving a local
+model (Ollama) runs sandboxed exactly like the 14a anchor — clean external
+workspace, omd host-side over HTTP, and the arm's **contamination guard flips
+from tool-starvation to reachability**: the all-False `tools` map (Step 7's
+MCP-only restriction) relaxes to workspace-scoped file/bash tools, disabling
+only the vectors a filesystem sandbox cannot stop (`webfetch`/`websearch` —
+the OpenCode spellings of the anchor's `_CONTAMINATION_TOOLS`). This lifts the
+`harnesses ⊆ {"claude"}` restriction `run_matrix` has carried since 14a and
+completes the §4b threat model for both arms.
+
+**What 14a already settled (inherited, not rebuilt).** The workspace policy
+(`$HOME`-rooted, outside both repos), the mount discipline (workspace is the
+ONLY volume), `OmdHttpService` + `advertise_host="host.docker.internal"` with
+the two-sided Host-allowlist fix (the 421 lesson), and the live recon fact
+that `host.docker.internal` forwards to the host **loopback** with no extra
+flags — Ollama at `127.0.0.1:11434` answered from in-container, so its bind
+does not change and nothing is exposed on LAN.
+
+**Design.**
+  1. **Image** (`containers/opencode.Dockerfile`): `node:22-slim` +
+     `npm install -g opencode-ai@1.17.5` (== the host brew binary, verified on
+     npm), `USER node`, `WORKDIR /workspace` — same skeleton as the anchor
+     image, tag `hangar-harness:opencode-1.17.5`. No python, no hangar code,
+     no `~/.config/opencode` state: the per-run `opencode.json` in the
+     workspace is the ONLY config the CLI finds (threat (d), structurally).
+     No secrets: `env_passthrough=()` — the local arm needs no token.
+  2. **Driver, one class** (`OpenCodeDriver(sandbox=ContainerSandbox | None)`):
+     sandboxed, `build_argv` wraps the same `opencode run` argv in
+     `sandbox.wrap_argv(...)` with `--dir /workspace`; the config and the
+     persisted `opencode_events.jsonl` land in the workspace (host path,
+     container-visible). A stdio `MCPServerSpec` is REFUSED when sandboxed
+     (same §2 rationale as the anchor: omd in the agent's privilege domain
+     forges the grading evidence).
+  3. **Config rendering grows a `sandboxed` flag:**
+     * provider `baseURL` rewrites loopback → `host.docker.internal`
+       (`http://localhost:11434/v1` → `http://host.docker.internal:11434/v1`);
+       the mcp url arrives already advertised by `OmdHttpService`.
+     * `tools`: sandboxed = ONLY `{"webfetch": False, "websearch": False}` —
+       file/bash built-ins come back at their defaults, scoped by the
+       container. Unsandboxed keeps the full all-False map (its cwd is still
+       host-side `data_root`), mirroring how the anchor's interim blocklist
+       stayed on for the host SDK driver.
+  4. **Runner:** drop the 14a `harnesses ⊆ {"claude"}` error; sandboxed driver
+     selection becomes per-harness (`claude` → `ClaudeCliDriver`, `opencode` →
+     `OpenCodeDriver(sandbox=ContainerSandbox(image=OPENCODE_IMAGE,
+     env_passthrough=()))`). `RunConfig` shape is unchanged — `sandbox:
+     "none"|"container"` already composes with `harnesses`; existing
+     `omd_transport="http"` validation already covers this arm.
+  5. **Smoke config:** `configs/paraboloid_opencode_sandbox.json`
+     (qwen3:8b — the floor model; 1 seed, http, container). The smoke proves
+     the MECHANISM, so speed beats quality: a first attempt with
+     qwen3.6:35b-mlx ran ~12 min PER TURN in-container (9 omd calls in 33
+     min, killed mid-task) — the stronger local models are for budgeted
+     sweeps, not smokes.
+
+**Acceptance (§4b's proof, scoped to this arm).**
+  1. **Isolation (live):** the 14a probes re-run against the opencode image —
+     the-hangar and this repo unreachable, workspace probe read/write OK.
+  2. **Channels intact (live):** in-container OpenCode reports the pinned
+     version; container → advertised omd URL admitted (≠ 421). This also
+     retires the Step-13 carry-over: the remote-MCP `{"type": "remote",
+     "url": ...}` config shape gets its first LIVE proof (it has only ever
+     been unit-tested).
+  3. **Task unbroken (live smoke):** sandboxed `paraboloid ×
+     opencode/qwen3.6:35b-mlx × 1 seed` completes with the tool trace
+     captured and the record effect-graded (`sandbox="container"`,
+     `sandbox_image` recorded). A local-model FAIL verdict is acceptable —
+     the anchor, not the floor model, proves task achievability (that ceiling
+     is Step 15's validity result); what must hold is the mechanism: runs
+     recorded in the provenance DB, no NO-RUN caused by the harness/channel.
+  4. **Relaxed safely (unit):** the sandboxed config disables ONLY
+     webfetch/websearch; the unsandboxed config still disables every built-in
+     — both pinned so neither can drift.
+  5. **Config contamination (unit):** the sandboxed `opencode.json` + argv
+     carry only container paths and `host.docker.internal` URLs — no host
+     filesystem path, no `OMD_*`, no `sys.executable`.
+
+**Non-goals.** No OpenHands (16); no new cases; no multi-seed local sweeps
+(budget separately once the arm exists); no MLX `mlx_lm.server` endpoint
+management (Ollama fronts the MLX models already); no network isolation
+beyond the tool map (the container legitimately needs omd + Ollama; OpenCode
+may fetch its provider npm package at first run — see risk 2).
+
+**Risks.** (1) OpenCode's remote-MCP shape unproven live (acceptance 2 exists
+to catch it; fallback is the documented `headers` / `oauth` variants of the
+same entry). (2) OpenCode resolves the `@ai-sdk/openai-compatible` provider
+package at runtime into its data dir — `docker run --rm` discards that cache,
+so each run may pay a small npm fetch; if the live smoke shows it is slow or
+flaky, pre-warm the package into the image at build time. (3) Local-model
+tool-format quirks over the remote transport (tool names still arrive as
+`omd_*`; the parser's prefix-strip is transport-agnostic, but verify in the
+events file). (4) Image/binary drift vs brew — pinned tag + `sandbox_image`
+in every record, same discipline as the anchor.
+
+**Git.** One commit: `feat: container sandbox — OpenCode local-LLM arm,
+relaxed tools map (Step 14b)`. User reviews/merges.
+
+> **Live proof (2026-07-19).** Every acceptance item held:
+> (1) isolation probes green against the opencode image (repos unreachable,
+> workspace probe read/write OK); (2) pinned CLI 1.17.5 answers in-container,
+> and the remote-MCP `{"type": "remote", "url": ...}` shape got its first
+> LIVE proof — dozens of omd calls served over the advertised
+> `host.docker.internal` URL (the Step-13 carry-over risk is retired);
+> (3) sandboxed `paraboloid × opencode/gemma4:26b-mlx` recorded EXECUTED omd
+> runs in the provenance DB and effect-graded through the full loop — seed 1
+> (`paraboloid_20260719T111938Z.jsonl`): 4 runs, 2 executed OK,
+> `analysis_f_xy` **exact PASS (39)**, `matches_effects=True`, overall FAIL
+> only because the model never ran the optimize plan (the acceptable
+> floor-model outcome the spec anticipated); (4+5) both tools maps and the
+> config-contamination properties pinned in unit tests (121 fast tests).
+> The relaxed built-ins were visibly used (workspace scratch files,
+> `todowrite`). Local-model color for future sweeps: qwen3:8b either
+> hand-writes schema-invalid plan YAML (8× `run_plan` USER_INPUT_ERROR on
+> its best seed) or stalls emitting neither text nor tool calls;
+> qwen3.6:35b-mlx ran ~12 min/turn in-container (9 calls in 33 min —
+> sweep-impractical on this machine); gemma4:26b-mlx is fast (~1-4 min/seed)
+> and tool-clean (75-100% valid) but flaky about finishing the workflow —
+> exactly the pass^k noise the multi-seed design (Step 9/12) exists to
+> measure.
 
 ---
 
