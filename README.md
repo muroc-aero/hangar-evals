@@ -70,13 +70,15 @@ rows exactly like manual runs — have-agent adds leases, retries, policy
 gates, and a briefing on top, never a second source of truth for scores.
 
 ```bash
-HAVE="uv run --project ../have-agent --with -e ."
-$HAVE have submit examples/lane_c_eval.yaml     # full 12-case suite, claude arm
-$HAVE have approve <study_id>
-$HAVE have worker run --id worker:evals-1 --solvers evals \
+# worker env = the-hangar project env (Lane A refs compute in-process)
+#   + have-agent (the CLI) + this package with the [anchor] extra
+HAVE="uv run --project ../the-hangar --with ../have-agent --with-editable .[anchor]"
+$HAVE have --db muroc.db submit examples/lane_c_eval.yaml   # full 12-case suite
+$HAVE have --db muroc.db approve <study_id>
+$HAVE have --db muroc.db worker run --id worker:evals-1 --solvers evals \
     --executor hangar.evals.have_bridge:make_worker \
     --executor-opt results_dir=results
-$HAVE have report <study_id>
+$HAVE have --db muroc.db report <study_id>
 ```
 
 An eval that runs cleanly but fails its grade is a *successful* job with a
