@@ -1,0 +1,72 @@
+# Lane C agent evals as a have-agent study — the full 12-case suite,
+# Claude anchor arm, 1 seed per cell.
+#
+# Each case below is one eval CELL (case × harness × model); the bridge
+# executor (src/hangar/evals/have_bridge.py) runs it through run_matrix and
+# writes the standard results triple into results/, so paper/make_tables.py
+# picks the rows up exactly like manual runs.
+#
+# Run it (from the hangar-evals repo root, the-hangar and have-agent as
+# siblings). The worker interpreter needs all three repos: the-hangar's
+# project env (Lane A refs are computed in-process), have-agent (the CLI),
+# and this package with the [anchor] extra (the Claude driver):
+#
+#   HAVE="uv run --project ../the-hangar --with ../have-agent --with-editable .[anchor]"
+#   $HAVE have --db muroc.db submit examples/lane_c_eval.yaml
+#   $HAVE have --db muroc.db approve <study_id>
+#   $HAVE have --db muroc.db worker run --id worker:evals-1 --solvers evals \
+#       --executor hangar.evals.have_bridge:make_worker \
+#       --executor-opt results_dir=results
+#   $HAVE have --db muroc.db report <study_id>
+#
+# --solvers evals matches this file's baseline template prefix ("evals/...");
+# a worker registered with other solvers will never claim these jobs.
+#
+# Sandboxed variant: append per-case overrides
+#   {..., omd_transport: http, sandbox: container}
+# or set them for every cell on the worker instead:
+#   --executor-opt omd_transport=http --executor-opt sandbox=container
+# (container sandbox REQUIRES the http transport; see RunConfig.)
+#
+# Prereqs: the-hangar dev-setup done and importable (HANGAR_REPO if not a
+# sibling), hangar-evals installed with the [anchor] extra, Claude CLI
+# authenticated for the anchor arm. ocp_pyc_coupled is deliberately absent —
+# it has no achievable Lane C path (see the-hangar docs/lane-c-runbook.md).
+
+study: lane_c_eval_v0
+title: Lane C agent evals (hangar-evals suite, claude anchor)
+baseline:
+  template: evals/lane_c   # informational: the bridge ignores plan_ref;
+                           # the prefix routes jobs to --solvers evals workers
+acceptance:
+  plausibility_suite: lane_c_effect_graded
+  min_pass_rate: 1.0       # every seed must pass for a "pass" verdict
+policy:
+  auto_retry_max: 1        # retries harness crashes, not graded FAILs
+  priority: 50
+
+cases:
+  - case_id: paraboloid_claude
+    overrides: {case: paraboloid, harness: claude, seeds: 1}
+  - case_id: oas_aero_rect_claude
+    overrides: {case: oas_aero_rect, harness: claude, seeds: 1}
+  - case_id: oas_aerostruct_rect_claude
+    overrides: {case: oas_aerostruct_rect, harness: claude, seeds: 1}
+  - case_id: ocp_caravan_basic_claude
+    overrides: {case: ocp_caravan_basic, harness: claude, seeds: 1}
+  - case_id: ocp_caravan_full_claude
+    overrides: {case: ocp_caravan_full, harness: claude, seeds: 1}
+  - case_id: ocp_hybrid_twin_claude
+    overrides: {case: ocp_hybrid_twin, harness: claude, seeds: 1}
+  - case_id: oas_ocp_combined_claude
+    overrides: {case: oas_ocp_combined, harness: claude, seeds: 1}
+  - case_id: ocp_oas_coupled_claude
+    overrides: {case: ocp_oas_coupled, harness: claude, seeds: 1}
+  - case_id: ocp_oas_direct_claude
+    overrides: {case: ocp_oas_direct, harness: claude, seeds: 1}
+  - case_id: pyc_turbojet_claude
+    overrides: {case: pyc_turbojet, harness: claude, seeds: 1}
+  - case_id: ocp_three_tool_claude
+    overrides: {case: ocp_three_tool, harness: claude, seeds: 1}
+  - case_id: evt_native_sizing_claude
+    overrides: {case: evt_native_sizing, harness: claude, seeds: 1}
