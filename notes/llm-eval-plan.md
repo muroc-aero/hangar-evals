@@ -69,10 +69,10 @@ beyond are the post-ladder refinements.
 | **9** | **Multi-seed + scriptable runs** — N seeds/cell → pass-rate `CellSummary`; `RunConfig` (JSON config + manifest) | `aggregate.py`, `run.py` (`RunConfig`/`run_matrix`), `configs/` | ✅ **DONE** |
 | **10** | **Wire the Claude anchor live** — the "% of anchor" ceiling; contamination guard on the anchor | `[anchor]` install, `configs/paraboloid_claude.json`, tightened `_DISALLOWED_TOOLS` + `setting_sources=[]`, `test_claude_sdk.py` | ✅ **DONE** |
 | **11** | **Effect-based grading + oracle self-test** — grade omd side effects (`run_cases`), demote the fenced-JSON self-report | `oracle.py` + `run.py` rewiring + ABC tests | ✅ **DONE** (spec §4c, PR #11) |
-| **12** | **Reporting rigor** — pass@1/pass@k/**pass^k** in the aggregate; pin environment versions in the manifest (incl. explicit anchor model); surface token counts | `aggregate.py`, `run.py` manifest, `environment.py` | ⏭ **IN PROGRESS (spec below §4d)** |
-| 13 | **omd-over-HTTP decoupling** — omd as a host-side HTTP service; parity test stdio↔HTTP (extracted from the old sandbox Task 1) | `MCPServerSpec` HTTP variant + `OmdHttpService` launcher + parity test | ⏭ **IMPLEMENTED 2026-07-17, awaiting review** (spec §4e); **hard prereq for 14** |
-| 14 | **Filesystem sandbox — container-per-run (colima)** — clean workspace OUTSIDE this repo; relax the interim tool blocklists (two commits: **14a anchor under local Claude Code auth**, **14b OpenCode/local-LLM arm**) | container image + `drivers/sandbox.py` + `drivers/claude_cli.py` + isolation test | **14a DONE 2026-07-18 (§4f, anchor-first per v1 goal); live smoke effect-graded PASS under local Claude Code auth (after the 421 Host-allowlist fix, spec item 5)**; 14b after (spec §4b) |
-| 15 | **Suite expansion** (T1 + T3 first) + per-case **task-validity** check (a scripted tool sequence reproduces Lane A) | new cases + scripted-baseline proofs | todo — after 14 |
+| **12** | **Reporting rigor** — pass@1/pass@k/**pass^k** in the aggregate; pin environment versions in the manifest (incl. explicit anchor model); surface token counts | `aggregate.py`, `run.py` manifest, `environment.py` | ✅ **DONE** (spec §4d, PR #12) |
+| 13 | **omd-over-HTTP decoupling** — omd as a host-side HTTP service; parity test stdio↔HTTP (extracted from the old sandbox Task 1) | `MCPServerSpec` HTTP variant + `OmdHttpService` launcher + parity test | ✅ **DONE** (spec §4e, PR #13) |
+| 14 | **Filesystem sandbox — container-per-run (colima)** — clean workspace OUTSIDE this repo; relax the interim tool blocklists (two commits: **14a anchor under local Claude Code auth**, **14b OpenCode/local-LLM arm**) | container image + `drivers/sandbox.py` + `drivers/claude_cli.py` + isolation test | **14a ✅ DONE** (spec §4f, PR #14; live sandboxed effect-graded PASS under local Claude Code auth); 14b after (spec §4b) |
+| 15 | **Suite expansion** (T1 + T3 first) + per-case **task-validity** check (a scripted tool sequence reproduces Lane A) | new cases + scripted-baseline proofs | ⏭ **T1+T4 IMPLEMENTED 2026-07-18, awaiting review** (spec §4g — every effect-gradable example landed in one shape; live proof: **12/12 scripted baselines VALID, all metrics exact PASS**); **T3 trap/recovery cases split to 15b** (different grading design) |
 | 16 | **OpenHands arm + deconfounding cells** — same local model through both harnesses; a Claude-via-OpenCode cell to split model vs harness ceiling | `drivers/openhands.py` + configs | todo |
 | 17 | **Live run progress** — watch seeds/turns/tokens during a run (§12) | streaming driver + driver-agnostic progress callback | todo |
 
@@ -930,6 +930,93 @@ anchor arm, local auth (Step 14a)`. User reviews/merges. (Prereqs: Steps
   * **User action required for acceptance item 3:** mint the token once with
     `claude setup-token` and export `CLAUDE_CODE_OAUTH_TOKEN` (the live smoke
     and the token-gated tests skip cleanly without it).
+
+---
+
+## 4g. Step 15 spec — Lane-C suite expansion + task-validity baselines (T1+T4 IMPLEMENTED 2026-07-18, awaiting review/merge)
+
+**Purpose.** Convert the proven single-case capability (paraboloid, sandboxed,
+local Claude Code auth) into the actual v1 goal: **the Lane-C examples,
+plural**. Every the-hangar example that is effect-gradable lands as a case,
+and every case ships with a **task-validity baseline** — a scripted (non-LLM)
+tool sequence that reproduces Lane A through the SAME channel an agent uses —
+so a model failure can never be confused with a task defect (§12b finding:
+τ-bench-style task-validity checks; GAIA's "solvable by construction").
+
+**What landed (one commit + one upstream PR).**
+
+  1. **12-case suite** (`cases.py`): paraboloid (T0, hinted prompt) + 11 new
+     cases on their `lane_c/*_open.prompt.md` open prompts — `oas_aero_rect`,
+     `oas_aerostruct_rect`, `ocp_caravan_basic`, `ocp_caravan_full`,
+     `ocp_hybrid_twin`, `oas_ocp_combined`, `ocp_oas_coupled`,
+     `ocp_oas_direct`, `pyc_turbojet`, `ocp_three_tool` (T4 multi-tool),
+     `evt_native_sizing`. Metrics/tolerances mirror the-hangar's
+     `eval_lane_c.py` (lane-c-full-coverage). **`ocp_pyc_coupled` is
+     excluded by design**: its materializer weight-slot precedence forces an
+     OEW passthrough (~8% OEW gap vs Lane A), so the task is not achievable
+     through the tools — exactly what the validity check exists to catch.
+     T3 trap/recovery cases are NOT here (15b): they need new prompts and a
+     recovery-grading design, not just case-table rows.
+
+  2. **Oracle evidence layers** (`oracle.py`). Raw `run_cases` final rows
+     hold OpenMDAO variable names, but suite metrics are SUMMARY quantities
+     (`fuel_burn_kg` integrates phases; `CL` reads a solver point) that never
+     appear as recorder variables. omd snapshots summary scalars into the
+     `assessment-<run_id>` metadata — but only through an OAS+OCP allowlist
+     that silently dropped pyCycle's `Fn`/`TSFC`/`OPR` and evt's
+     `sized_mtow_kg`/... → **the-hangar PR #101** widens the snapshot to
+     every scalar summary key. The oracle now reads both layers: assessment
+     scalars (+ composite per-component summaries flattened to
+     `<comp_id>.<key>`) overlaying raw final data. Metric lookup: exact key
+     in assessment values → exact key in raw recorder data (paraboloid's
+     promoted `x`/`y`/`f_xy`) → **unique dotted-suffix match** among
+     flattened component keys (composites — the agent names the components,
+     so `wing_CL` grades via `effect_key="CL"` whatever the comp id is; an
+     ambiguous suffix grades None, never a guess). `MODE_BY_MODULE` is now
+     total over the suite (all new modules → `"analysis"`), and a test keeps
+     it total so an unmapped module can't grade silently wrong.
+
+  3. **Task-validity runner** (`validity.py`). Per case, a scripted MCP
+     client (ported from the-hangar's in-process `test_parity_lane_c.py`)
+     drives the REAL `OmdHttpService` over streamable HTTP — same server,
+     transport, and `data_root` as a live seed — then the outcome is graded
+     by the SAME oracle+scoring path as an agent run. VALID means both
+     halves hold: the tool surface reproduces Lane A, AND the oracle can
+     read the evidence from the provenance DB. Physical inputs come from
+     each example's `shared.py` via a new seam helper
+     (`hangar_ref.shared_constants`, same subprocess-per-example pattern as
+     `lane_a_reference`). CLI: `python -m hangar.evals.validity --case X` /
+     `--all`; writes `results/validity/validity_<stamp>.json`. evt uses the
+     vendored `archer_midnight` template (the blind-agent path; the
+     repo-relative `CONFIG_DIR` Lane A loads doesn't resolve under the
+     service's `cwd=data_root` — and matches by design anyway).
+
+**Dependencies.** the-hangar `lane-c-full-coverage` (the open prompts +
+parity tests) must be present in the resolved checkout — `test_cases.py`
+fails loudly at suite level if not — and the-hangar **PR #101**
+(assessment-scalar widening) must be live for pyc/evt effect grading.
+
+**Non-goals.** No T3 trap/recovery cases (15b); no T2 no-hint/workflow
+grading variants; no anchor/local-model runs across the suite (that's just
+`--case <name>` now — budget the anchor sweep deliberately, ~$1.7/case-seed);
+no polar/study run modes in the oracle.
+
+> **Live proof (2026-07-18, `validity_20260718T160242Z.json`): 12/12 cases
+> VALID, every metric an exact PASS against its Lane A reference.**
+> Highlights: `oas_ocp_combined` graded `wing_CL`/`wing_CD` through the
+> unique-suffix path (composite metrics survive agent-chosen component ids),
+> and `pyc_turbojet` + `evt_native_sizing` graded through the widened
+> assessment snapshot (the-hangar PR #101) — both evidence layers proven on
+> the wire, not just in unit tests. Wall clock: 1.5–6.3 s per case, except
+> `ocp_three_tool` at 2513 s active compute (monotonic; end-to-end elapsed
+> was ~4 h including machine sleep). Its server log shows the pyCycle HBTF
+> surrogate deck generated **three times** in one baseline (one per factory
+> instantiation across assemble/validate/run) plus a **fourth** in the
+> Lane A reference subprocess — `deck_path=None` means no disk cache
+> (`pyc/surrogate.py`). Until the-hangar caches decks (the `deck_path`
+> option exists; nothing sets it — candidate upstream follow-up),
+> `ocp_three_tool` is impractical for multi-seed sweeps; keep it in the
+> suite for validity/anchor use, but budget it separately.
 
 ---
 
