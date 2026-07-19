@@ -65,6 +65,12 @@ class Case:
     prompt_file: str        # file under <example>/lane_c/
     metrics: list[Metric]
     supplement: str = ""    # extra task detail a blind MCP agent can't read
+    # Per-case budgets (Step 18). The runner enforces timeout_s as a hard
+    # wall-clock cap around the whole agent run; both observed SDK failures
+    # (a crash and a deterministic hang) came AFTER the physics finished, so
+    # expiry costs nothing — effects are still graded from the provenance DB.
+    max_turns: int = 80
+    timeout_s: float = 900.0    # 15 min default; override per case
     lane_a_modules: list[str] = field(init=False, default_factory=list)
 
     def __post_init__(self):
@@ -191,11 +197,15 @@ CASES: dict[str, Case] = {
             Metric("OPR", "design_analysis", "OPR", rtol=1e-4),
         ],
     ),
+    # Three-tool coupled mission: every run_plan invokes OAS + OCP + pyCycle
+    # together, so honest attempts legitimately take far longer than the suite
+    # default — 45 min before the runner calls it a hang.
     "ocp_three_tool": Case(
         name="ocp_three_tool",
         example="ocp_three_tool",
         prompt_file="coupled_mission_open.prompt.md",
         metrics=_ocp_metrics("coupled_mission"),
+        timeout_s=2700.0,
     ),
     # Lane A loads the archer-midnight vehicle from its JSON config file; the
     # built-in template is vendored from that same file, so the template-built

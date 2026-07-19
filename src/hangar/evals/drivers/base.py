@@ -94,6 +94,11 @@ class AgentResult:
     # provider keys pass through. None means the harness reported nothing
     # (None != 0; values are never invented).
     tokens: dict | None = None
+    # The run hit its wall-clock budget and was killed (Step 18). Everything
+    # above is then PARTIAL — whatever the harness emitted before expiry —
+    # but the record still grades: the effect oracle reads the provenance DB,
+    # not this result.
+    timed_out: bool = False
 
 
 class AgentDriver(Protocol):
@@ -110,5 +115,6 @@ class AgentDriver(Protocol):
         data_root: Path,
         model: str | None = None,
         max_turns: int = 80,
+        timeout_s: float | None = None,
     ) -> AgentResult:
         ...

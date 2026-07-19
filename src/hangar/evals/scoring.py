@@ -69,14 +69,22 @@ def extract_report(text: str) -> dict:
     raise ValueError(f"No parseable JSON report in agent output:\n{text[-2000:]}")
 
 
-def compute_refs(example: str, metrics: list[Metric]) -> dict[str, dict]:
+def compute_refs(
+    example: str, metrics: list[Metric], cache_dir=None
+) -> dict[str, dict]:
     """Compute Lane A references for every module the metrics reference.
 
     One subprocess per module via the seam (each example's ``shared.py``
-    collides on ``sys.path``), keyed by module name.
+    collides on ``sys.path``), keyed by module name. ``cache_dir`` passes
+    through to the seam's disk cache (Step 18) — expensive references
+    (ocp_three_tool: ~70 min) survive across processes when the-hangar is at
+    a clean SHA.
     """
     modules = sorted({m.lane_a_module for m in metrics})
-    return {mod: lane_a_reference(example, mod) for mod in modules}
+    return {
+        mod: lane_a_reference(example, mod, cache_dir=cache_dir)
+        for mod in modules
+    }
 
 
 def for_reporting(metrics: list[Metric]) -> list[Metric]:

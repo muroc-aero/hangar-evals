@@ -49,3 +49,13 @@ def test_metric_keys_unique_within_each_case():
     for case in CASES.values():
         keys = [m.key for m in case.metrics]
         assert len(keys) == len(set(keys)), case.name
+
+
+def test_per_case_budgets():
+    # Step 18: every case carries its own turn + wall-clock budgets. The suite
+    # default is 15 min; ocp_three_tool legitimately runs long (OAS + OCP +
+    # pyCycle per run_plan) and gets 45.
+    for case in CASES.values():
+        assert case.max_turns == 80, case.name
+        expected = 2700.0 if case.name == "ocp_three_tool" else 900.0
+        assert case.timeout_s == expected, case.name
