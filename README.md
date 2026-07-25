@@ -43,6 +43,7 @@ hangar-evals/
   pyproject.toml          # dist: hangar-evals; PEP 420 hangar.evals namespace pkg
   src/hangar/evals/       # package source (leaf __init__ only)
   tests/                  # pytest suite (added alongside each step)
+  examples/               # StudyRequest YAMLs for the have-agent bridge
   results/                # gitignored eval run outputs (never committed)
 ```
 
@@ -56,3 +57,38 @@ this reads as a sibling rather than a foreign tree.
 uv pip install -e ".[dev]"
 python -c "import hangar.evals; print(hangar.evals.__version__)"
 ```
+
+## Run as a have-agent study
+
+`src/hangar/evals/have_bridge.py` plugs the eval runner into the sibling
+[have-agent](https://github.com/muroc-aero/have-agent) study substrate via its
+`--executor pkg.module:factory` plugin seam: one have-agent job = one eval
+cell (case x harness x model, N seeds), executed through the same
+`run_matrix` the CLI uses. Jobs write the standard results triple into
+`results/`, so `paper/make_tables.py` in the-hangar consumes study-produced
+rows exactly like manual runs — have-agent adds leases, retries, policy
+gates, and a briefing on top, never a second source of truth for scores.
+
+```bash
+# worker env = the-hangar project env (Lane A refs compute in-process)
+#   + have-agent (the CLI) + this package with the [anchor] extra
+HAVE="uv run --project ../the-hangar --with ../have-agent --with-editable .[anchor]"
+$HAVE have --db muroc.db submit examples/lane_c_eval.yaml   # full 12-case suite
+$HAVE have --db muroc.db approve <study_id>
+$HAVE have --db muroc.db worker run --id worker:evals-1 --solvers evals \
+    --executor hangar.evals.have_bridge:make_worker \
+    --executor-opt results_dir=results
+$HAVE have --db muroc.db report <study_id>
+```
+
+An eval that runs cleanly but fails its grade is a *successful* job with a
+failing CHECK verdict (`min_pass_rate` in the study's `acceptance:` block);
+only harness crashes and malformed payloads fail the job itself. See the
+header of `examples/lane_c_eval.yaml` for prerequisites.
+
+For the fully sandboxed run — every agent in a container, both arms —
+submit `examples/lane_c_eval_sandboxed.yaml` instead: 24 cells, the 12-case
+suite x {claude anchor under local Claude Code auth, `gemma4:26b-mlx` via
+OpenCode/Ollama}, each with `omd_transport: http` + `sandbox: container`.
+Its header lists the extra prerequisites (colima up, sandbox images built,
+`CLAUDE_CODE_OAUTH_TOKEN` exported, gemma pulled).
