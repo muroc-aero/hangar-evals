@@ -255,6 +255,16 @@ def test_example_study_covers_the_full_suite(path):
         assert set(ov) <= have_bridge._CELL_KEYS
 
 
+@pytest.mark.parametrize("path", [EXAMPLE_YAML, SANDBOXED_YAML],
+                         ids=["anchor", "sandboxed"])
+def test_example_study_policy_auto_accepts(path):
+    # have-agent only lets a CHECK run against a *succeeded* ANALYSIS when the
+    # study policy has a truthy auto_accept (acceptance itself comes from the
+    # CHECK verdict). Without it every CHECK deadlocks in queued.
+    spec = yaml.safe_load(path.read_text())
+    assert spec["policy"]["auto_accept"] == {"verdict_level": "pass"}
+
+
 def test_sandboxed_study_runs_both_arms_in_containers():
     spec = yaml.safe_load(SANDBOXED_YAML.read_text())
     cases = spec["cases"]
