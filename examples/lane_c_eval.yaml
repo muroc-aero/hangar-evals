@@ -44,6 +44,9 @@ acceptance:
 policy:
   auto_retry_max: 1        # retries harness crashes, not graded FAILs
   priority: 50
+  auto_accept:             # REQUIRED: lets CHECK jobs run against succeeded
+    verdict_level: pass    # ANALYSIS jobs (acceptance comes from the verdict;
+                           # without this the CHECKs deadlock in queued)
 
 cases:
   - case_id: paraboloid_claude
