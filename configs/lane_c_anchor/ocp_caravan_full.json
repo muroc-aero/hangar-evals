@@ -1,0 +1,13 @@
+{
+  "case": "ocp_caravan_full",
+  "harnesses": [
+    "claude"
+  ],
+  "model": "claude-opus-4-8",
+  "seeds": 3,
+  "max_turns": 80,
+  "timeout_s": 900,
+  "results_dir": "results",
+  "omd_transport": "http",
+  "sandbox": "container"
+}

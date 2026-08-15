@@ -3,8 +3,11 @@
 Closes threat (e) of the §4b model structurally: the agent's writable world is
 one scratch **workspace**, created OUTSIDE both repos and mounted as the ONLY
 volume; omd state (``data_root``) is never mounted — the agent reaches omd over
-HTTP via ``host.docker.internal``, which colima forwards to the host loopback
-(verified live 2026-07-18, no ``--add-host`` needed, loopback binds intact).
+HTTP via ``host.docker.internal``. ``wrap_argv`` maps that name to the host with
+``--add-host=host.docker.internal:host-gateway`` (portable: colima, Docker
+Desktop, AND native-Linux Docker all honor ``host-gateway``), paired with the
+0.0.0.0 omd bind (``omd_service`` ``bind_host``) so the same URL resolves on
+every host with no run-path branch.
 
 The workspace root MUST live under ``$HOME``: colima's VM mounts only ``$HOME``
 and ``/tmp/colima``, and a bind-mount from anywhere else (e.g. python's default
@@ -13,6 +16,7 @@ and ``/tmp/colima``, and a bind-mount from anywhere else (e.g. python's default
 
 from __future__ import annotations
 
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +63,13 @@ class ContainerSandbox:
         container it started.
         """
         argv = ["docker", "run", "--rm"]
+        # Map host.docker.internal → the host in-container. `host-gateway` is a
+        # Docker special value (Engine 20.10+) honored by Docker Desktop, colima,
+        # AND native-Linux Docker, so the advertised URL resolves identically on
+        # every host — no run-path branch. HANGAR_HOST_GATEWAY overrides the
+        # right-hand side if a runtime ever routes it elsewhere.
+        gateway = os.environ.get("HANGAR_HOST_GATEWAY", "host-gateway")
+        argv += ["--add-host", f"host.docker.internal:{gateway}"]
         if name:
             argv += ["--name", name]
         for var in self.env_passthrough:

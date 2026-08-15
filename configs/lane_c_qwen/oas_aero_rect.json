@@ -1,0 +1,13 @@
+{
+  "case": "oas_aero_rect",
+  "harnesses": [
+    "opencode"
+  ],
+  "model": "qwen3.6:35b-mlx",
+  "seeds": 5,
+  "max_turns": 80,
+  "timeout_s": 900,
+  "results_dir": "results",
+  "omd_transport": "http",
+  "sandbox": "container"
+}

@@ -52,9 +52,16 @@ class OmdHttpService:
 
     def __init__(self, data_root: Path, host: str = "127.0.0.1",
                  advertise_host: str | None = None,
-                 startup_timeout_s: float = 120.0):
+                 startup_timeout_s: float = 120.0,
+                 bind_host: str | None = None):
         self.data_root = Path(data_root).resolve()
-        self.host = host
+        self.host = host                    # loopback readiness-poll host
+        # Bind the listener wider than loopback so a container on native-Linux
+        # Docker (which reaches the host over the bridge gateway, not loopback)
+        # can connect; env OMD_HOST overrides. 0.0.0.0 is harmless on macOS —
+        # loopback clients still hit it, and it's the FastMCP allowed-hosts
+        # guard below (not the bind) that gates which Host headers are admitted.
+        self.bind_host = bind_host or os.environ.get("OMD_HOST", "0.0.0.0")
         self.advertise_host = advertise_host or host
         self.startup_timeout_s = startup_timeout_s
         self.proc: subprocess.Popen | None = None
@@ -84,7 +91,7 @@ class OmdHttpService:
             # (e.g. ./hangar_data) lands in the run's root, not the runner's.
             self.proc = subprocess.Popen(
                 [sys.executable, "-m", "hangar.omd.server",
-                 "--transport", "http", "--host", self.host, "--port", str(port)],
+                 "--transport", "http", "--host", self.bind_host, "--port", str(port)],
                 stdout=log, stderr=log, stdin=subprocess.DEVNULL, env=env,
                 cwd=str(self.data_root),
             )
