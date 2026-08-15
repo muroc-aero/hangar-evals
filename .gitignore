@@ -222,3 +222,9 @@ __marimo__/
 # (gitignore has no inline comments — the pattern must be on its own line.)
 results/
 .DS_Store
+# local run state — per-host, regenerated, never committed:
+muroc.db
+anchor.out
+artifacts/
+logs/
+.claude/scheduled_tasks.lock

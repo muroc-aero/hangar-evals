@@ -1,0 +1,71 @@
+# Lane C agent evals — PUBLICATION run, gemma local arm — 5 seeds.
+# 11-case suite x 5 seeds/cell, sandboxed (container + http).
+# ocp_three_tool is DROPPED (needs reconfiguring to run under a uniform cap);
+# every remaining case is capped at 900s (15 min).
+#
+# ARMS ARE SEPARATE STUDY FILES so you can run them independently — the Opus
+# anchor draws Max-plan usage and wants a deliberate window; the local arms are
+# free and can run overnight. aggregate.py / paper/make_tables.py key rows by
+# (case,harness,model) across ALL of results/, so the three studies merge into
+# one comparison table no matter when each is run.
+#
+# CHUNKING: the runner checkpoints — stop the worker (Ctrl-C) anytime and re-run
+# the same `worker run` line later; it resumes on the missing seeds only. For
+# finer control on the anchor, use the per-case configs in configs/lane_c_anchor/
+# with the direct runner (one case per invocation).
+#
+#   HAVE="uv run --project ../the-hangar --with ../have-agent --with-editable .[anchor]"
+#   $HAVE have --db muroc.db submit examples/lane_c_pub_gemma.yaml
+#   $HAVE have --db muroc.db approve <study_id>
+#   $HAVE have --db muroc.db worker run --id worker:evals-1 --solvers evals \
+#       --executor hangar.evals.have_bridge:make_worker \
+#       --executor-opt results_dir=results
+#   $HAVE have --db muroc.db report <study_id>
+#
+# Prereqs: colima up; sandbox images built (hangar-harness:anchor-*/opencode-*);
+# CLAUDE_CODE_OAUTH_TOKEN exported (anchor only); ollama up with the local model.
+
+study: lane_c_pub_gemma
+title: Lane C evals — publication gemma local (5 seeds)
+baseline:
+  template: evals/lane_c
+acceptance:
+  plausibility_suite: lane_c_effect_graded
+  # Per-cell CHECK gate only — graded FAILs still record as result rows.
+  min_pass_rate: 1.0
+policy:
+  # Required, and must be a MAPPING (not a bool). Without it a succeeded ANALYSIS
+  # never satisfies its CHECK's dependency, so CHECK/REPORT never run and the
+  # pipeline stalls after ANALYSIS (scheduler._dep_satisfied treats it as truthy);
+  # control.apply_verdict_gates then reads auto_accept.verdict_level, so a bool
+  # crashes it. A CHECK verdict at verdict_level auto-accepts its ANALYSIS;
+  # warn/fail go to the review inbox (gate_on, default [warn,fail]) — that is the
+  # human gate #2. Acceptance of a cell comes AFTER its verdict.
+  auto_accept:
+    verdict_level: pass
+  auto_retry_max: 1
+  priority: 50
+
+cases:
+  - case_id: paraboloid_gemma4
+    overrides: {case: paraboloid, harness: opencode, model: "gemma4:26b-mlx", seeds: 5, timeout_s: 900, omd_transport: http, sandbox: container}
+  - case_id: oas_aero_rect_gemma4
+    overrides: {case: oas_aero_rect, harness: opencode, model: "gemma4:26b-mlx", seeds: 5, timeout_s: 900, omd_transport: http, sandbox: container}
+  - case_id: oas_aerostruct_rect_gemma4
+    overrides: {case: oas_aerostruct_rect, harness: opencode, model: "gemma4:26b-mlx", seeds: 5, timeout_s: 900, omd_transport: http, sandbox: container}
+  - case_id: ocp_caravan_basic_gemma4
+    overrides: {case: ocp_caravan_basic, harness: opencode, model: "gemma4:26b-mlx", seeds: 5, timeout_s: 900, omd_transport: http, sandbox: container}
+  - case_id: ocp_caravan_full_gemma4
+    overrides: {case: ocp_caravan_full, harness: opencode, model: "gemma4:26b-mlx", seeds: 5, timeout_s: 900, omd_transport: http, sandbox: container}
+  - case_id: ocp_hybrid_twin_gemma4
+    overrides: {case: ocp_hybrid_twin, harness: opencode, model: "gemma4:26b-mlx", seeds: 5, timeout_s: 900, omd_transport: http, sandbox: container}
+  - case_id: oas_ocp_combined_gemma4
+    overrides: {case: oas_ocp_combined, harness: opencode, model: "gemma4:26b-mlx", seeds: 5, timeout_s: 900, omd_transport: http, sandbox: container}
+  - case_id: ocp_oas_coupled_gemma4
+    overrides: {case: ocp_oas_coupled, harness: opencode, model: "gemma4:26b-mlx", seeds: 5, timeout_s: 900, omd_transport: http, sandbox: container}
+  - case_id: ocp_oas_direct_gemma4
+    overrides: {case: ocp_oas_direct, harness: opencode, model: "gemma4:26b-mlx", seeds: 5, timeout_s: 900, omd_transport: http, sandbox: container}
+  - case_id: pyc_turbojet_gemma4
+    overrides: {case: pyc_turbojet, harness: opencode, model: "gemma4:26b-mlx", seeds: 5, timeout_s: 900, omd_transport: http, sandbox: container}
+  - case_id: evt_native_sizing_gemma4
+    overrides: {case: evt_native_sizing, harness: opencode, model: "gemma4:26b-mlx", seeds: 5, timeout_s: 900, omd_transport: http, sandbox: container}
