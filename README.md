@@ -92,3 +92,29 @@ suite x {claude anchor under local Claude Code auth, `gemma4:26b-mlx` via
 OpenCode/Ollama}, each with `omd_transport: http` + `sandbox: container`.
 Its header lists the extra prerequisites (colima up, sandbox images built,
 `CLAUDE_CODE_OAUTH_TOKEN` exported, gemma pulled).
+
+## Name sampler (standalone)
+
+`scripts/sample_names.py` draws given names from three public datasets, for
+when a task needs a set of names that is not all Anglo-American. It is a
+stdlib-only script — no dependency on `hangar.evals`, nothing added to the
+package.
+
+```bash
+# CC0 set (sigpwned/popular-names-by-country), 100 names, downloaded + cached
+python scripts/sample_names.py --source sigpwned --n 100 --seed 7
+
+# stratified: 20 names per country from names-dataset's per-country top 200,
+# so no region is over-represented  (pip install names-dataset; ~3.2GB RAM)
+python scripts/sample_names.py --source names-dataset --per-country 20 --seed 7
+
+# frequency among notable humans, via a Wikidata P735 SPARQL count
+python scripts/sample_names.py --source wikidata --n 500 --seed 7
+```
+
+`--per-country` is the reason to reach for `names-dataset`: it gives every
+country the same number of slots instead of letting population weight decide.
+`--gender`, `--script {romanized,localized}`, `--countries`, and
+`--format {text,csv,json,jsonl}` shape the output; `--seed` makes the draw
+reproducible. The script's module docstring covers each source's provenance
+caveats. `--help` lists everything.
