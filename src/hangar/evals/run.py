@@ -84,7 +84,7 @@ from hangar.evals.trace import parse_tool_trace, read_provenance
 # always an explicit string in records and manifests. OpenCode floors to the
 # pulled smoke model.
 HARNESSES = {
-    "claude": (ClaudeAgentSDKDriver, "claude-opus-4-8"),
+    "claude": (ClaudeAgentSDKDriver, "claude-opus-5"),
     "opencode": (OpenCodeDriver, "qwen3:8b"),
 }
 
