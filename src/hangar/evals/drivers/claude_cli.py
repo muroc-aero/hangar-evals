@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -43,6 +44,25 @@ from hangar.evals.drivers.sandbox import CONTAINER_WORKSPACE, ContainerSandbox
 from hangar.evals.trace import ToolCall
 
 _TOKEN_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
+
+# An auth failure makes the CLI echo the Authorization header back in its own
+# output, so the anchor's credential can appear in the event stream we persist.
+# `op run` conceals secrets on the streams it proxies, but NOT what we write to
+# disk -- redact here, at the one place raw agent output enters the harness.
+# The second branch follows a header fold (`\n` + indent, escaped inside a JSON
+# string or raw), which is how the echoed value arrives; it requires whitespace
+# after the newline so an ordinary JSONL line break can never be swallowed.
+_SECRET_RE = re.compile(r"sk-ant-(?:[A-Za-z0-9_\-]+|(?:\\n|\n)[ \t]+)+")
+
+
+def redact_secrets(text: str) -> str:
+    """Replace any Anthropic credential in ``text`` with ``<redacted>``.
+
+    Applied to agent stdout/stderr BEFORE either is persisted or parsed, so a
+    credential cannot reach ``claude_events.jsonl``, a records ``.jsonl`` (via
+    an error row's message or a final report), or a terminal.
+    """
+    return _SECRET_RE.sub("<redacted>", text)
 
 
 def render_mcp_config(mcp: MCPServerSpec) -> dict:
@@ -156,14 +176,17 @@ class ClaudeCliDriver:
             subprocess.run(["docker", "kill", container],
                            capture_output=True, text=True)
 
-        # Persist the raw event stream next to the agent's scratch files so
-        # every run is debuggable after the fact.
-        (workspace / "claude_events.jsonl").write_text(proc.stdout)
+        # Persist the event stream next to the agent's scratch files so every
+        # run is debuggable after the fact -- redacted first, and the redacted
+        # text is what gets parsed, so no downstream record can carry a secret.
+        stdout = redact_secrets(proc.stdout)
+        (workspace / "claude_events.jsonl").write_text(stdout)
 
         if not proc.timed_out and proc.returncode != 0:
             raise RuntimeError(
-                f"sandboxed claude run failed (exit {proc.returncode}):\n{proc.stderr}")
-        parsed = parse_stream_json(proc.stdout, mcp.name)
+                f"sandboxed claude run failed (exit {proc.returncode}):\n"
+                f"{redact_secrets(proc.stderr)}")
+        parsed = parse_stream_json(stdout, mcp.name)
         return AgentResult(
             final_text=parsed.final_text,
             cost_usd=parsed.cost_usd,

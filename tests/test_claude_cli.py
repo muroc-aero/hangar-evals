@@ -16,6 +16,7 @@ import pytest
 from hangar.evals.drivers.claude_cli import (
     ClaudeCliDriver,
     parse_stream_json,
+    redact_secrets,
     render_mcp_config,
 )
 from hangar.evals.drivers.base import MCPServerSpec
@@ -167,3 +168,76 @@ def test_run_timeout_kills_container_and_keeps_partial_stream(monkeypatch, tmp_p
     assert [c.tool for c in result.tool_call_trace] == ["start_session"]
     assert result.cost_usd is None      # priced only at result delivery
     assert (tmp_path / "claude_events.jsonl").read_text() == partial
+
+
+# --- credential redaction ------------------------------------------------
+# A failed auth makes the CLI echo the Authorization header into its own
+# output. These pin that no shape of that echo survives into anything we
+# persist -- and that redaction never corrupts the JSONL around it.
+
+def test_redact_secrets_removes_a_plain_token():
+    out = redact_secrets("Bearer sk-ant-oat01-AbC123_def-XYZ done")
+    assert "sk-ant" not in out
+    assert out == "Bearer <redacted> done"
+
+
+def test_redact_secrets_removes_a_header_folded_token_including_the_tail():
+    # The observed shape: the echoed header is folded mid-token, escaped
+    # inside a JSON string. A per-line redactor would leave the tail behind.
+    folded = r"invalid value: 'Bearer sk-ant-oat01-AbC123def\n TAILPART456'"
+    out = redact_secrets(folded)
+    assert "sk-ant" not in out and "TAILPART456" not in out
+    # Same when the fold arrives as a real newline rather than an escape.
+    out_raw = redact_secrets("Bearer sk-ant-oat01-AbC123def\n TAILPART456'")
+    assert "sk-ant" not in out_raw and "TAILPART456" not in out_raw
+
+
+def test_redact_secrets_does_not_swallow_the_next_jsonl_record():
+    # A line break followed by a non-whitespace char is a record boundary,
+    # never a fold -- redaction must stop there or it merges two JSON lines.
+    stream = '{"a":"sk-ant-oat01-AbC123"}\n{"b":"kept"}'
+    out = redact_secrets(stream)
+    assert "sk-ant" not in out
+    assert json.loads(out.splitlines()[1]) == {"b": "kept"}
+    assert json.loads(out.splitlines()[0]) == {"a": "<redacted>"}
+
+
+def test_run_redacts_credentials_before_persisting_or_parsing(monkeypatch, tmp_path):
+    import hangar.evals.drivers.claude_cli as cli_mod
+    from hangar.evals.drivers.proc import ProcOutcome
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    leaked = _evt({
+        "type": "result", "subtype": "success", "is_error": True,
+        "result": "API Error: Header 'Authorization' has invalid value: "
+                  "'Bearer sk-ant-oat01-AbC123def'",
+        "num_turns": 1, "total_cost_usd": 0,
+    })
+    monkeypatch.setattr(cli_mod, "run_process",
+                        lambda argv, timeout_s=None, cwd=None:
+                        ProcOutcome(0, leaked, "", timed_out=False))
+
+    result = ClaudeCliDriver().run(
+        "task", MCPServerSpec.omd_http("http://h:1/mcp"), tmp_path)
+
+    on_disk = (tmp_path / "claude_events.jsonl").read_text()
+    assert "sk-ant" not in on_disk
+    # The parsed report is what lands in the records .jsonl -- also clean.
+    assert "sk-ant" not in result.final_text
+    assert "<redacted>" in result.final_text
+
+
+def test_run_redacts_credentials_in_the_failure_message(monkeypatch, tmp_path):
+    import hangar.evals.drivers.claude_cli as cli_mod
+    from hangar.evals.drivers.proc import ProcOutcome
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    monkeypatch.setattr(cli_mod, "run_process",
+                        lambda argv, timeout_s=None, cwd=None:
+                        ProcOutcome(1, "", "auth failed: sk-ant-oat01-AbC123def",
+                                    timed_out=False))
+    # The message becomes an error row's `error.message` -- must not carry it.
+    with pytest.raises(RuntimeError) as exc:
+        ClaudeCliDriver().run(
+            "task", MCPServerSpec.omd_http("http://h:1/mcp"), tmp_path)
+    assert "sk-ant" not in str(exc.value)
