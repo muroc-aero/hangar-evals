@@ -373,7 +373,7 @@ def test_run_matrix_sandboxed_opencode_gets_the_local_arm_sandbox(tmp_path, monk
 def test_claude_anchor_model_is_pinned():
     # Decision 2 (spec §4d): "SDK default" must not be a reachable state — the
     # anchor model is a literal string, so records/manifests always name it.
-    assert run_mod.HARNESSES["claude"][1] == "claude-opus-4-8"
+    assert run_mod.HARNESSES["claude"][1] == "claude-opus-5"
 
 
 # --- run_matrix: multi-seed wiring + manifest (run_cell faked) ------------------
