@@ -1,9 +1,11 @@
 {
   "case": "paraboloid",
-  "harnesses": ["claude"],
+  "harnesses": [
+    "claude"
+  ],
   "model": "claude-opus-5",
   "seeds": 1,
-  "max_turns": 80,
+  "max_turns": 100,
   "results_dir": "results",
   "omd_transport": "http"
 }

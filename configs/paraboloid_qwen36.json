@@ -1,8 +1,10 @@
 {
   "case": "paraboloid",
-  "harnesses": ["opencode"],
+  "harnesses": [
+    "opencode"
+  ],
   "model": "qwen3.6:35b-mlx",
   "seeds": 3,
-  "max_turns": 80,
+  "max_turns": 100,
   "results_dir": "results"
 }

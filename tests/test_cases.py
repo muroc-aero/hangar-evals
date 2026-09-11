@@ -56,6 +56,6 @@ def test_per_case_budgets():
     # default is 15 min; ocp_three_tool legitimately runs long (OAS + OCP +
     # pyCycle per run_plan) and gets 45.
     for case in CASES.values():
-        assert case.max_turns == 80, case.name
-        expected = 2700.0 if case.name == "ocp_three_tool" else 900.0
+        assert case.max_turns == 100, case.name
+        expected = 2700.0 if case.name == "ocp_three_tool" else 1100.0
         assert case.timeout_s == expected, case.name

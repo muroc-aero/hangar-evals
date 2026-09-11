@@ -69,8 +69,13 @@ class Case:
     # wall-clock cap around the whole agent run; both observed SDK failures
     # (a crash and a deterministic hang) came AFTER the physics finished, so
     # expiry costs nothing — effects are still graded from the provenance DB.
-    max_turns: int = 80
-    timeout_s: float = 900.0    # 15 min default; override per case
+    # Calibrated on the model the arm actually runs. 80/900 was set for
+    # claude-opus-4-8; claude-opus-5 works the problem harder for the same
+    # task -- paraboloid's median went 43 -> 66.5 turns and one seed died on
+    # the 80-turn cap, while pyc_turbojet sat exactly on the 900 s wall. Two
+    # arms measured under different budgets is a confound, not a result.
+    max_turns: int = 100
+    timeout_s: float = 1100.0   # ~18 min default; override per case
     lane_a_modules: list[str] = field(init=False, default_factory=list)
 
     def __post_init__(self):

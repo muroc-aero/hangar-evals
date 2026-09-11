@@ -5,8 +5,8 @@
   ],
   "model": "qwen3.6:35b-mlx",
   "seeds": 5,
-  "max_turns": 80,
-  "timeout_s": 900,
+  "max_turns": 100,
+  "timeout_s": 1100,
   "results_dir": "results",
   "omd_transport": "http",
   "sandbox": "container"
