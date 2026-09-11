@@ -65,3 +65,46 @@ def test_markdown_has_one_row_per_cell_plus_header_and_rule():
 
 def test_empty_campaign_renders_without_raising():
     assert report.render_terminal([]) == "(no cells yet)"
+
+
+class _FakeStream:
+    """Records writes and flushes, so buffering behaviour is assertable."""
+
+    def __init__(self):
+        self.written, self.flushes = [], 0
+
+    def write(self, data):
+        self.written.append(data)
+        return len(data)
+
+    def flush(self):
+        self.flushes += 1
+
+
+def test_tee_flushes_the_terminal_on_every_line(tmp_path):
+    """A piped stdout block-buffers, and every real launch is piped.
+
+    The launch line is `op run --env-file=op.env -- scripts/evals run anchor`;
+    `op` proxies the child's streams to conceal secrets, so stdout is a pipe.
+    Without a per-line flush a whole arm's output sits in an 8 KB buffer and the
+    runner is silent for hours — which is the exact failure it exists to fix.
+    """
+    from hangar.evals.campaign import Tee
+
+    stream = _FakeStream()
+    tee = Tee(stream, tmp_path / "campaign.log")
+    tee.write("[ 1/11] paraboloid\n")
+    assert stream.flushes == 1
+    tee.write("no newline yet")
+    assert stream.flushes == 1          # partial line: nothing to flush
+    tee.close()
+
+
+def test_tee_also_writes_every_line_to_the_log(tmp_path):
+    from hangar.evals.campaign import Tee
+
+    log = tmp_path / "campaign.log"
+    tee = Tee(_FakeStream(), log)
+    tee.write("[ 1/11] paraboloid\n")
+    assert "paraboloid" in log.read_text()   # readable mid-run, not at exit
+    tee.close()

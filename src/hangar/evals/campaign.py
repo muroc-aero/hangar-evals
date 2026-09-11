@@ -110,7 +110,15 @@ def _hms(seconds: float) -> str:
 
 
 class Tee:
-    """Mirror stdout into the campaign log, so scrollback survives the terminal."""
+    """Mirror stdout into the campaign log, so scrollback survives the terminal.
+
+    Both sides flush per line. Python block-buffers stdout whenever it is not a
+    TTY, and the launch line for a real run is
+    ``op run --env-file=op.env -- scripts/evals ...`` — ``op`` proxies the child's
+    streams to conceal secrets, so stdout is a pipe and a whole arm's output sat
+    in a 8 KB buffer. A runner whose reason to exist is being watchable cannot
+    go quiet the moment it is piped into `tee`, a log, or a CI job.
+    """
 
     def __init__(self, stream, path: Path):
         self._stream = stream
@@ -119,6 +127,8 @@ class Tee:
     def write(self, data):
         self._stream.write(data)
         self._fh.write(data)
+        if "\n" in data:
+            self._stream.flush()
         return len(data)
 
     def flush(self):
@@ -518,6 +528,11 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
     results_dir = Path(args.results_dir or REPO_ROOT / "results")
+
+    try:  # see Tee: a piped stdout block-buffers, and every real launch is piped
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):  # already wrapped, or not reconfigurable
+        pass
 
     if args.cmd == "status":
         print(report.render_terminal(_stored_cells(results_dir),
