@@ -183,9 +183,17 @@ class ClaudeCliDriver:
         (workspace / "claude_events.jsonl").write_text(stdout)
 
         if not proc.timed_out and proc.returncode != 0:
+            # Seven seeds of the 2026-09-10 anchor arm died here with an EMPTY
+            # stderr, leaving a record that said only "exit 1" -- nothing to
+            # diagnose from, and 21% of the arm ungraded. A container that fails
+            # to start says so on stdout, or says nothing at all and is only
+            # identifiable by its workspace, so report all three.
+            detail = redact_secrets(proc.stderr).strip() or "(no stderr)"
+            tail = redact_secrets(proc.stdout).strip().splitlines()[-5:]
             raise RuntimeError(
-                f"sandboxed claude run failed (exit {proc.returncode}):\n"
-                f"{redact_secrets(proc.stderr)}")
+                f"sandboxed claude run failed (exit {proc.returncode}): {detail}\n"
+                f"  stdout tail: {' | '.join(tail) if tail else '(empty)'}\n"
+                f"  workspace  : {workspace}")
         parsed = parse_stream_json(stdout, mcp.name)
         return AgentResult(
             final_text=parsed.final_text,

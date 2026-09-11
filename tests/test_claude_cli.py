@@ -241,3 +241,28 @@ def test_run_redacts_credentials_in_the_failure_message(monkeypatch, tmp_path):
         ClaudeCliDriver().run(
             "task", MCPServerSpec.omd_http("http://h:1/mcp"), tmp_path)
     assert "sk-ant" not in str(exc.value)
+
+
+def test_a_silent_container_failure_still_reports_something_actionable(
+        monkeypatch, tmp_path):
+    """The 2026-09-10 shape: exit 1, empty stderr, nothing to diagnose from.
+
+    Seven of that arm's 33 seeds landed here and every one recorded only
+    "sandboxed claude run failed (exit 1):" -- 21% of the arm ungraded with no
+    evidence of why. Whatever the cause, the record has to name where to look.
+    """
+    import hangar.evals.drivers.claude_cli as cli_mod
+    from hangar.evals.drivers.proc import ProcOutcome
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    monkeypatch.setattr(cli_mod, "run_process",
+                        lambda argv, timeout_s=None, cwd=None:
+                        ProcOutcome(1, "docker: no space left on device", "",
+                                    timed_out=False))
+    with pytest.raises(RuntimeError) as exc:
+        ClaudeCliDriver().run(
+            "task", MCPServerSpec.omd_http("http://h:1/mcp"), tmp_path)
+    message = str(exc.value)
+    assert "(no stderr)" in message                   # says stderr was empty
+    assert "no space left on device" in message       # surfaces the stdout tail
+    assert str(tmp_path) in message                   # names the workspace
