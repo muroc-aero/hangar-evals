@@ -243,9 +243,11 @@ async def _ocp_three_tool(call: ToolCaller, sh: dict) -> None:
         config=_mission_config(
             sh["MISSION"], slots=slots,
             template="b738", architecture="twin_turbofan",
-            # NLBGS: dual-surrogate coupling leaves Newton ill-conditioned.
-            solver_settings={"solver_type": "nlbgs", "maxiter": 200,
-                             "atol": 1.0e-8, "rtol": 1.0e-8},
+            # Newton: NonlinearBlockGS cannot solve the mission's
+            # throttle / alpha / duration balances at all.
+            solver_settings={"solver_type": "newton", "maxiter": 60,
+                             "atol": 1.0e-10, "rtol": 1.0e-10,
+                             "solve_subsystems": True},
         ),
     )
     await _assemble_and_run(call, d)
