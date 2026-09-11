@@ -51,7 +51,7 @@ from hangar.evals import preflight, report
 from hangar.evals.environment import capture_environment
 from hangar.evals.hangar_ref import resolve_hangar_repo
 from hangar.evals.have_bridge import config_from_overrides
-from hangar.evals.regrade import regrade_file
+from hangar.evals.regrade import load_records, regrade_file
 from hangar.evals.results_index import case_status
 from hangar.evals.run import RunConfig, load_resume_records, run_matrix
 
@@ -457,6 +457,26 @@ def _finish(name: str, summaries: list[dict], out_dir: Path, results_dir: Path,
 
     print()
     print(report.render_terminal(summaries, f"== '{name}' results"))
+
+    # Harness health is kept OUT of the results table on purpose: these are
+    # defects in the measurement, and a defect belongs in a fix, not in every
+    # future reader's way. The target is a forced re-run that reports none.
+    health = {"n_ambiguous": 0, "n_degraded": 0}
+    for cell in summaries:
+        for key, value in (cell.get("harness_health") or {}).items():
+            health[key] = health.get(key, 0) + value
+    if any(health.values()):
+        print("\n== harness health (fix these, do not annotate them)")
+        if health["n_ambiguous"]:
+            print(f"   {health['n_ambiguous']} seed(s) scored on whichever "
+                  "same-mode run ran LAST — prompts that ask for a comparison "
+                  "run against a policy that grades the last one.")
+        if health["n_degraded"]:
+            print(f"   {health['n_degraded']} seed(s) graded but their harness "
+                  "exited abnormally on the way.")
+        print("   Neither changed a verdict. Both mean this arm is not yet a "
+              "clean measurement — re-run with --force once fixed.")
+
     print(f"\n   table.md   {out_dir / 'table.md'}")
     print(f"   manifest   {out_dir / 'manifest.json'}")
     print(f"   full log   {out_dir / 'campaign.log'}")
@@ -504,6 +524,59 @@ def _stored_cells(results_dir: Path) -> list[dict]:
     return [latest[k] for k in sorted(latest)]
 
 
+def review_rows(results_dir: Path) -> list[dict]:
+    """Seeds a person has to adjudicate, newest records first.
+
+    A disagreement between the agent's own verdict and the effect grade cannot
+    be resolved by rule: the same signature covers an agent that misreported its
+    numbers and a grading policy that scored the wrong one of the agent's runs.
+    Both need someone to open the artifacts, so this hands over the paths.
+    """
+    rows = []
+    for path in sorted(results_dir.glob("*.jsonl"), reverse=True):
+        try:
+            records = load_records(path)
+        except (OSError, json.JSONDecodeError, KeyError):
+            continue
+        for r in records:
+            rep = r.get("reporting") or {}
+            if not rep.get("parsed"):
+                continue
+            if bool(rep.get("passed")) == bool(r.get("passed")):
+                continue
+            rows.append({
+                "case": r["case"], "model": r.get("model"), "seed": r.get("seed"),
+                "graded": "PASS" if r.get("passed") else "FAIL",
+                "reported": "PASS" if rep.get("passed") else "FAIL",
+                "scores": r.get("scores") or [],
+                "data_root": r.get("data_root"), "workspace": r.get("workspace"),
+                "ambiguity": (r.get("oracle") or {}).get("ambiguity") or 0,
+            })
+    return rows
+
+
+def print_review(rows: list[dict]) -> None:
+    if not rows:
+        print("Nothing awaiting review — every parsed report agrees with its grade.")
+        return
+    print(f"== {len(rows)} seed(s) awaiting review\n")
+    for row in rows:
+        print(f"  {row['case']} · {row['model']} · seed {row['seed']}")
+        print(f"     graded {row['graded']}, agent reported {row['reported']}")
+        for sc in row["scores"]:
+            got = "null" if sc.get("agent") is None else f"{sc['agent']:.6g}"
+            if sc.get("verdict") != "PASS":
+                print(f"       {sc['key']:<16s} ref={sc['lane_a']:.6g} "
+                      f"graded-run={got}  -> {sc['verdict']}")
+        if row["ambiguity"]:
+            print(f"     NOTE: the oracle skipped {row['ambiguity']} successful "
+                  "same-mode run(s) — the grade may be of the wrong run")
+        print(f"     provenance {row['data_root']}/analysis.db")
+        if row["workspace"]:
+            print(f"     transcript {row['workspace']}/claude_events.jsonl")
+        print()
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="evals", description=__doc__.splitlines()[0])
@@ -522,7 +595,8 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--results-dir", type=Path, default=None)
 
     for name, help_text in (("status", "print the table from stored results"),
-                            ("table", "regrade and re-render the paper tables")):
+                            ("table", "regrade and re-render the paper tables"),
+                            ("review", "list seeds awaiting a human look")):
         p = sub.add_parser(name, help=f"{help_text}; run nothing")
         p.add_argument("--results-dir", type=Path, default=None)
 
@@ -533,6 +607,10 @@ def main(argv: list[str] | None = None) -> int:
         sys.stdout.reconfigure(line_buffering=True)
     except (AttributeError, ValueError):  # already wrapped, or not reconfigurable
         pass
+
+    if args.cmd == "review":
+        print_review(review_rows(results_dir))
+        return 0
 
     if args.cmd == "status":
         print(report.render_terminal(_stored_cells(results_dir),

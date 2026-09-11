@@ -164,6 +164,23 @@ class RunConfig:
         return cls.from_dict(json.loads(Path(path).read_text()))
 
 
+class HarnessError(RuntimeError):
+    """The harness broke; the agent was never given a fair chance to be judged.
+
+    The line this draws is the one that decides re-runs. An agent that reasons
+    badly, picks the wrong components, or never converges produces a graded
+    FAIL -- a RESULT, and re-running it would be sampling until the answer
+    flatters. A harness that crashes, loses its network, or has its credential
+    expire produces nothing to grade, and re-running it is just finishing the
+    measurement.
+
+    So: raised only when the harness ended abnormally AND the agent produced no
+    successful run to grade. A crash after the physics is not this -- that work
+    is real and gets graded, the same way an expired wall-clock budget always
+    has.
+    """
+
+
 def run_cell(
     case: Case,
     driver,
@@ -240,6 +257,15 @@ def run_cell(
         if report is not None else None
     )
 
+    # An abnormal exit that cost no work is a harness error, not a result: with
+    # no successful run there is nothing to grade, and grading it FAIL would
+    # report harness fragility as agent incapability.
+    if result.exit_code and not any(r.executed_ok for r in runs):
+        raise HarnessError(
+            f"harness exited {result.exit_code} with no successful omd run to "
+            f"grade — nothing was measured. data_root={data_root}"
+            + (f" workspace={workspace}" if workspace else ""))
+
     # Tool-use (harness trace) + workflow adherence (provenance DB).
     trace = result.tool_call_trace or []
     tool_metrics = parse_tool_trace(trace)
@@ -285,6 +311,9 @@ def run_cell(
             "max_turns": turn_budget,
             "timeout_s": wall_budget,
             "timed_out": result.timed_out,
+            # Non-zero harness exit AFTER work was produced. The seed grades
+            # (the effects are real); this marks the run as harness-degraded.
+            "exit_code": result.exit_code,
             # Normalized token counts; None when the harness reported none
             # (third-party drivers that never set it still work).
             "tokens": result.tokens,

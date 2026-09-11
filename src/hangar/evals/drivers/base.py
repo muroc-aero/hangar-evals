@@ -99,6 +99,12 @@ class AgentResult:
     # but the record still grades: the effect oracle reads the provenance DB,
     # not this result.
     timed_out: bool = False
+    # Non-zero exit from the harness process. Same contract as ``timed_out``:
+    # the run ended abnormally, everything above is PARTIAL, and the record
+    # still grades from the provenance DB. A crash that happens AFTER the
+    # physics is a harness fault, not an agent result -- discarding the work
+    # would report harness fragility as agent incapability.
+    exit_code: int | None = None
 
 
 class AgentDriver(Protocol):

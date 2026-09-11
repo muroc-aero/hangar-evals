@@ -5,22 +5,25 @@ Why this exists: a summary is a pure function of its records
 runs that already happened, including arms whose model is retired. This module
 does that, and adds the two counts a pass-rate alone hides.
 
-``n_ambiguous`` -- seeds where the oracle skipped a successful mode-matching
-run (``oracle.ambiguity > 0``). The grading policy is "the LAST successful run
-of the matching mode" (oracle.select_run) -- deliberate, so spray-and-pray
-cannot pay. But several Lane C prompts ASK for a comparison run ("judge
-whether the fuel burn sits slightly above what the same profile would burn
-without the takeoff roll"), and an agent that obeys can leave a control run
-last. The score then depends on run ORDER rather than on the work. That is not
-a fail in the sense a reader assumes, so it is counted, not buried.
+``n_harness_errors`` -- seeds the harness lost: it crashed, or its credential
+or network went, and the agent produced no successful run to grade. These are
+NOT results. They are the only failures that earn a re-run, and a table with a
+nonzero count here is not finished -- fix the harness and run the case again.
 
-``n_report_disagrees`` -- seeds where the agent's own fenced-JSON verdict
-differs from the effect-graded one. Both directions matter: a graded FAIL with
-a self-reported PASS is either this ordering artifact or a dishonest report,
-and the two are distinguished by hand, not by a heuristic here.
+``n_needs_review`` -- seeds where the agent's own fenced-JSON verdict differs
+from the effect grade. Nothing here can be resolved automatically: the same
+signature covers an agent that misreported its numbers and a grading policy
+that scored the wrong one of the agent's runs. So it is routed to a person,
+with the artifacts, via ``evals review``.
 
-Neither count changes any verdict. The selection policy is untouched; this
-only makes an order-dependent score visible to whoever reads the table.
+Neither count changes a verdict.
+
+Not counted any more: oracle ambiguity (how many successful same-mode runs the
+"grade the last one" policy skipped). It measured a defect in the HARNESS --
+prompts that ask for a comparison run, against a policy that grades whichever
+run happens to be last -- and a defect belongs in a fix, not in a permanent
+column of the results table. ``harness_health`` still reports it so it can be
+fixed; see ``oracle.oracle_ambiguity``.
 
 Usage:
     python -m hangar.evals.regrade                       # -> results/regraded/
@@ -56,13 +59,32 @@ def load_records(records_path: Path) -> list[dict]:
 
 def extra_counts(records: list[dict]) -> dict[str, int]:
     """The counts ``aggregate_cell`` does not carry (see module docstring)."""
-    ambiguous = sum(
-        1 for r in records if ((r.get("oracle") or {}).get("ambiguity") or 0) > 0)
-    disagrees = sum(
+    harness_errors = sum(1 for r in records if r.get("error"))
+    needs_review = sum(
         1 for r in records
         if (r.get("reporting") or {}).get("parsed")
         and bool((r.get("reporting") or {}).get("passed")) != bool(r.get("passed")))
-    return {"n_ambiguous": ambiguous, "n_report_disagrees": disagrees}
+    return {"n_harness_errors": harness_errors, "n_needs_review": needs_review}
+
+
+def harness_health(records: list[dict]) -> dict[str, int]:
+    """Defects in the MEASUREMENT, for fixing — never for the results table.
+
+    ``n_ambiguous`` counts seeds whose score depended on which of the agent's
+    same-mode runs happened to execute last. ``n_degraded`` counts seeds that
+    graded but whose harness exited abnormally on the way. Both mean the
+    apparatus is imperfect, not that the agent is: a run with either is a
+    candidate for a re-run once the cause is fixed, and the goal is a forced
+    re-run that reports zero of both.
+    """
+    return {
+        "n_ambiguous": sum(
+            1 for r in records
+            if ((r.get("oracle") or {}).get("ambiguity") or 0) > 0),
+        "n_degraded": sum(
+            1 for r in records
+            if (r.get("telemetry") or {}).get("exit_code")),
+    }
 
 
 def regrade_file(records_path: Path) -> list[dict]:
@@ -75,6 +97,7 @@ def regrade_file(records_path: Path) -> list[dict]:
         recs.sort(key=lambda r: r["seed"])
         summary = aggregate_cell(recs).to_dict()
         summary.update(extra_counts(recs))
+        summary["harness_health"] = harness_health(recs)
         out.append(summary)
     return out
 
@@ -104,10 +127,10 @@ def main(argv: list[str] | None = None) -> int:
             continue
         for s in summaries:
             flags = []
-            if s["n_ambiguous"]:
-                flags.append(f"{s['n_ambiguous']} ambiguous")
-            if s["n_report_disagrees"]:
-                flags.append(f"{s['n_report_disagrees']} report-disagree")
+            if s["n_harness_errors"]:
+                flags.append(f"{s['n_harness_errors']} harness error")
+            if s["n_needs_review"]:
+                flags.append(f"{s['n_needs_review']} to review")
             print(f"  {s['case']:24s} {s.get('model') or '-':18s} "
                   f"{s['n_passed']}/{s['n_seeds']} passed"
                   + (f"  [{', '.join(flags)}]" if flags else ""))

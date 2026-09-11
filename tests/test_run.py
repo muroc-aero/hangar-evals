@@ -18,7 +18,12 @@ import pytest
 from hangar.evals import run as run_mod
 from hangar.evals.cases import CASES, build_prompt
 from hangar.evals.drivers.base import AgentResult
-from hangar.evals.run import RunConfig, run_cell, run_matrix
+from hangar.evals.run import (
+    HarnessError,
+    RunConfig,
+    run_cell,
+    run_matrix,
+)
 from hangar.evals.scoring import compute_refs
 from hangar.evals.trace import ToolCall
 
@@ -32,11 +37,13 @@ class _FakeDriver:
     ``run`` — simulating the omd side effects of a real agent run.
     """
 
-    def __init__(self, final_text, trace=None, db_fixture=None, timed_out=False):
+    def __init__(self, final_text, trace=None, db_fixture=None, timed_out=False,
+                 exit_code=None):
         self.final_text = final_text
         self.trace = trace or []
         self.db_fixture = db_fixture
         self.timed_out = timed_out
+        self.exit_code = exit_code
         self.seen_prompt = None
         self.seen_mcp = None
 
@@ -57,6 +64,7 @@ class _FakeDriver:
             tool_call_trace=self.trace,
             tokens={"input": 1000, "output": 250},
             timed_out=self.timed_out,
+            exit_code=self.exit_code,
         )
 
 
@@ -539,3 +547,57 @@ def test_run_matrix_resume_reruns_only_missing_seeds(monkeypatch, tmp_path):
     assert len(rows) == 4
     latest = load_resume_records(records_path)
     assert {r["seed"]: r["passed"] for r in latest} == {0: True, 1: True, 2: True}
+
+
+# --- what an abnormal harness exit costs -------------------------------------
+# The line these draw decides re-runs. An agent that performs badly produces a
+# graded FAIL and is never re-run; a harness that breaks produces nothing to
+# grade and is always re-run. Conflating them either samples until the answer
+# flatters, or reports harness fragility as agent incapability.
+
+
+def test_a_crash_after_the_work_still_grades(tmp_path):
+    """The 2026-09-10 loss, fixed.
+
+    Seven anchor seeds exited 1 while executing `record_conclusion` -- after
+    the physics. One was later shown to hold four completed runs and to grade
+    PASS on every metric, yet it was recorded as an error and counted against
+    the arm. An expired wall-clock budget has always been graded on exactly
+    this reasoning; a crash is no different.
+    """
+    (tmp_path / "run_data").mkdir()
+    driver = _FakeDriver(_correct_report(), db_fixture=FIXTURE_DB, exit_code=1)
+
+    rec = run_cell(CASES["paraboloid"], driver, "fake", "m0", 0, tmp_path)
+
+    assert rec["passed"] is True                    # the work was real
+    assert rec["telemetry"]["exit_code"] == 1       # and the crash stays visible
+
+
+def test_a_crash_before_any_work_is_a_harness_error(tmp_path):
+    """No successful run means nothing was measured -- so it is not a result.
+
+    Grading this FAIL would blame the agent for the harness dying before it
+    ever got to run anything.
+    """
+    (tmp_path / "run_data").mkdir()
+    driver = _FakeDriver("", db_fixture=None, exit_code=1)
+
+    with pytest.raises(HarnessError, match="no successful omd run"):
+        run_cell(CASES["paraboloid"], driver, "fake", "m0", 0, tmp_path)
+
+
+def test_a_clean_exit_with_no_work_is_a_graded_failure_not_a_harness_error(tmp_path):
+    """The agent ran, produced nothing gradeable, and the harness was fine.
+
+    That is a RESULT -- an agent that never got a plan to execute -- and
+    re-running it would be sampling until it flatters.
+    """
+    (tmp_path / "run_data").mkdir()
+    driver = _FakeDriver("I could not work out the tool surface.", db_fixture=None)
+
+    rec = run_cell(CASES["paraboloid"], driver, "fake", "m0", 0, tmp_path)
+
+    assert rec["completed"] is False
+    assert rec["passed"] is False
+    assert rec["telemetry"]["exit_code"] is None

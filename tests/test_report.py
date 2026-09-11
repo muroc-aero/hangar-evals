@@ -1,8 +1,9 @@
+
 """Table rendering -- the live table and the final table share one renderer.
 
-The property worth pinning is that Ambig and Rep-dis travel with Passed. A
-pass-rate alone hides the two ways it misleads, and the whole point of the
-column pair is that a reader cannot get the number without the caveat.
+The columns report OUTCOMES. What these pin is the distinction that decides
+re-runs: a graded FAIL is a result about the agent and stays; a seed the harness
+lost was never measured, is not a failure, and must not be counted as one.
 """
 
 from __future__ import annotations
@@ -10,57 +11,80 @@ from __future__ import annotations
 from hangar.evals import report
 
 
-def _summary(case="paraboloid", passed=2, seeds=3, ambig=0, repdis=0):
+def _summary(case="paraboloid", passed=2, seeds=3, harness=0, review=0):
     return {"case": case, "harness": "claude", "model": "claude-opus-5",
-            "n_seeds": seeds, "n_completed": seeds, "n_passed": passed,
-            "n_ambiguous": ambig, "n_report_disagrees": repdis,
+            "n_seeds": seeds, "n_completed": seeds - harness, "n_passed": passed,
+            "n_harness_errors": harness, "n_needs_review": review,
             "turns": {"min": 38, "median": 40.5, "max": 43},
             "wall_clock_s": {"min": 208.0, "median": 229.5, "max": 251.0},
             "valid_call_rate": {"min": 1.0, "median": 1.0, "max": 1.0}}
 
 
-def test_flags_are_empty_when_the_pass_rate_reads_at_face_value():
+def test_flags_are_empty_when_the_row_needs_no_action():
     assert report.flags(_summary()) == ""
 
 
-def test_flags_name_both_counts():
-    assert report.flags(_summary(ambig=3, repdis=2)) == "[3 ambig, 2 rep-dis]"
+def test_flags_name_the_actions():
+    assert report.flags(_summary(harness=2, review=1)) == \
+        "[2 harness errors, 1 to review]"
 
 
-def test_cells_carry_the_gating_counts_beside_the_pass_rate():
-    cells = report.summary_cells(_summary(passed=0, ambig=3, repdis=3))
-    assert cells["passed"] == "0/3"
-    assert cells["ambig"] == "3" and cells["repdis"] == "3"
+def test_a_lost_seed_is_not_counted_as_a_failure():
+    # 3 seeds, 2 passed, 1 lost to the harness -> 0 failed, not 1. Counting it
+    # as a failure reports harness fragility as agent incapability.
+    cells = report.summary_cells(_summary(passed=2, seeds=3, harness=1))
+    assert cells["passed"] == "2/3"
+    assert cells["failed"] == "0"
+    assert cells["harness"] == "1"
 
 
-def test_a_summary_predating_regrade_shows_unknown_not_zero():
-    # "--" and "0" mean different things: one is "not measured", the other is
-    # "measured, and clean". Rendering the first as the second would license
-    # exactly the face-value reading the columns exist to prevent.
+def test_a_graded_failure_is_counted_as_one():
+    cells = report.summary_cells(_summary(passed=1, seeds=3, harness=0))
+    assert cells["failed"] == "2"
+
+
+def test_a_summary_predating_the_counts_shows_unknown_not_zero():
+    # "--" and "0" mean different things: one is "not measured", the other
+    # "measured, and clean". Rendering the first as the second would claim a
+    # clean run nobody checked.
     bare = {"case": "x", "harness": "claude", "model": "m", "n_seeds": 1,
             "n_completed": 1, "n_passed": 1}
     cells = report.summary_cells(bare)
-    assert cells["ambig"] == "--" and cells["repdis"] == "--"
+    assert cells["harness"] == "--" and cells["review"] == "--"
+    assert cells["failed"] == "--"
 
 
-def test_terminal_table_totals_and_warns_when_counts_are_nonzero():
-    out = report.render_terminal([_summary(passed=3), _summary(case="ocp_caravan_full",
-                                                              passed=0, ambig=3, repdis=3)])
-    assert "3/6 seeds passed across 2 cell(s)" in out
-    assert "3 ambiguous, 3 report-disagree" in out
-    assert "face value only where both are 0" in out
+def test_the_pass_rate_is_over_graded_seeds_not_all_seeds():
+    out = report.render_terminal([_summary(passed=2, seeds=3, harness=1)])
+    assert "2/2 graded seeds passed" in out
 
 
-def test_terminal_table_stays_quiet_when_every_cell_is_clean():
+def test_harness_errors_say_the_table_is_not_final():
+    out = report.render_terminal([_summary(passed=2, seeds=3, harness=1)])
+    assert "NOT a result" in out and "not final" in out
+
+
+def test_review_seeds_are_routed_to_a_person():
+    out = report.render_terminal([_summary(review=2)])
+    assert "need a human look" in out and "evals review" in out
+
+
+def test_a_clean_cell_gets_no_warnings():
     out = report.render_terminal([_summary(passed=3)])
-    assert "face value" not in out
+    assert "NOT a result" not in out and "human look" not in out
+
+
+def test_there_is_no_ambiguity_column():
+    # It measured a defect in the apparatus. Defects get fixed, not columned.
+    assert "Ambig" not in report.render_markdown([_summary()])
+    assert not any(key == "ambig" for key, _, _ in report.COLUMNS)
 
 
 def test_markdown_has_one_row_per_cell_plus_header_and_rule():
     md = report.render_markdown([_summary(), _summary(case="pyc_turbojet")])
     lines = [ln for ln in md.splitlines() if ln.startswith("|")]
     assert len(lines) == 4
-    assert lines[0].startswith("| Case | Model | Seeds |")
+    assert lines[0].startswith("| Case | Model | Seeds | Passed | Failed | Lost |")
 
 
 def test_empty_campaign_renders_without_raising():

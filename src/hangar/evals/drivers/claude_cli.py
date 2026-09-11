@@ -182,20 +182,22 @@ class ClaudeCliDriver:
         stdout = redact_secrets(proc.stdout)
         (workspace / "claude_events.jsonl").write_text(stdout)
 
+        # A non-zero exit is reported, never raised. The timeout path above has
+        # always fallen through to grade from the provenance DB, on the stated
+        # grounds that the observed failures land AFTER the physics finishes --
+        # and that is exactly what a crash does too. Raising here discarded
+        # seven seeds of the 2026-09-10 anchor arm; one of them was later shown
+        # to have produced four completed runs and would have graded PASS on
+        # every metric. run_cell decides whether the exit cost any work.
         if not proc.timed_out and proc.returncode != 0:
-            # Seven seeds of the 2026-09-10 anchor arm died here with an EMPTY
-            # stderr, leaving a record that said only "exit 1" -- nothing to
-            # diagnose from, and 21% of the arm ungraded. A container that fails
-            # to start says so on stdout, or says nothing at all and is only
-            # identifiable by its workspace, so report all three.
             detail = redact_secrets(proc.stderr).strip() or "(no stderr)"
-            tail = redact_secrets(proc.stdout).strip().splitlines()[-5:]
-            raise RuntimeError(
-                f"sandboxed claude run failed (exit {proc.returncode}): {detail}\n"
-                f"  stdout tail: {' | '.join(tail) if tail else '(empty)'}\n"
-                f"  workspace  : {workspace}")
+            tail = redact_secrets(proc.stdout).strip().splitlines()[-3:]
+            print(f"    !! harness exited {proc.returncode}: {detail}\n"
+                  f"       stdout tail: {' | '.join(tail) if tail else '(empty)'}\n"
+                  f"       workspace  : {workspace}")
         parsed = parse_stream_json(stdout, mcp.name)
         return AgentResult(
+            exit_code=None if proc.returncode == 0 else proc.returncode,
             final_text=parsed.final_text,
             cost_usd=parsed.cost_usd,
             wall_clock_s=wall,

@@ -227,7 +227,8 @@ def test_run_redacts_credentials_before_persisting_or_parsing(monkeypatch, tmp_p
     assert "<redacted>" in result.final_text
 
 
-def test_run_redacts_credentials_in_the_failure_message(monkeypatch, tmp_path):
+def test_run_redacts_credentials_in_the_failure_diagnostic(monkeypatch, tmp_path,
+                                                          capsys):
     import hangar.evals.drivers.claude_cli as cli_mod
     from hangar.evals.drivers.proc import ProcOutcome
 
@@ -236,20 +237,22 @@ def test_run_redacts_credentials_in_the_failure_message(monkeypatch, tmp_path):
                         lambda argv, timeout_s=None, cwd=None:
                         ProcOutcome(1, "", "auth failed: sk-ant-oat01-AbC123def",
                                     timed_out=False))
-    # The message becomes an error row's `error.message` -- must not carry it.
-    with pytest.raises(RuntimeError) as exc:
-        ClaudeCliDriver().run(
-            "task", MCPServerSpec.omd_http("http://h:1/mcp"), tmp_path)
-    assert "sk-ant" not in str(exc.value)
+    # The diagnostic is printed, not raised, but it is still the place a
+    # credential would surface -- and now it reaches a terminal and a log file.
+    ClaudeCliDriver().run(
+        "task", MCPServerSpec.omd_http("http://h:1/mcp"), tmp_path)
+    out = capsys.readouterr().out
+    assert "sk-ant" not in out
+    assert "<redacted>" in out
 
 
 def test_a_silent_container_failure_still_reports_something_actionable(
-        monkeypatch, tmp_path):
+        monkeypatch, tmp_path, capsys):
     """The 2026-09-10 shape: exit 1, empty stderr, nothing to diagnose from.
 
     Seven of that arm's 33 seeds landed here and every one recorded only
-    "sandboxed claude run failed (exit 1):" -- 21% of the arm ungraded with no
-    evidence of why. Whatever the cause, the record has to name where to look.
+    "sandboxed claude run failed (exit 1):" -- 21% of the arm with no evidence
+    of why. Whatever the cause, the diagnostic has to name where to look.
     """
     import hangar.evals.drivers.claude_cli as cli_mod
     from hangar.evals.drivers.proc import ProcOutcome
@@ -259,10 +262,25 @@ def test_a_silent_container_failure_still_reports_something_actionable(
                         lambda argv, timeout_s=None, cwd=None:
                         ProcOutcome(1, "docker: no space left on device", "",
                                     timed_out=False))
-    with pytest.raises(RuntimeError) as exc:
-        ClaudeCliDriver().run(
-            "task", MCPServerSpec.omd_http("http://h:1/mcp"), tmp_path)
-    message = str(exc.value)
-    assert "(no stderr)" in message                   # says stderr was empty
-    assert "no space left on device" in message       # surfaces the stdout tail
-    assert str(tmp_path) in message                   # names the workspace
+    result = ClaudeCliDriver().run(
+        "task", MCPServerSpec.omd_http("http://h:1/mcp"), tmp_path)
+    out = capsys.readouterr().out
+    assert "(no stderr)" in out                       # says stderr was empty
+    assert "no space left on device" in out           # surfaces the stdout tail
+    assert str(tmp_path) in out                       # names the workspace
+    # And the exit survives on the result, so run_cell can decide what it cost
+    # rather than the driver discarding the run outright.
+    assert result.exit_code == 1
+
+
+def test_a_clean_run_carries_no_exit_code(monkeypatch, tmp_path):
+    import hangar.evals.drivers.claude_cli as cli_mod
+    from hangar.evals.drivers.proc import ProcOutcome
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "tok")
+    monkeypatch.setattr(cli_mod, "run_process",
+                        lambda argv, timeout_s=None, cwd=None:
+                        ProcOutcome(0, "", "", timed_out=False))
+    result = ClaudeCliDriver().run(
+        "task", MCPServerSpec.omd_http("http://h:1/mcp"), tmp_path)
+    assert result.exit_code is None

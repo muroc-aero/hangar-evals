@@ -19,10 +19,10 @@ COLUMNS = [
     ("case", "Case", "<"),
     ("model", "Model", "<"),
     ("seeds", "Seeds", ">"),
-    ("ran", "Ran", ">"),
     ("passed", "Passed", ">"),
-    ("ambig", "Ambig", ">"),
-    ("repdis", "Rep-dis", ">"),
+    ("failed", "Failed", ">"),
+    ("harness", "Lost", ">"),
+    ("review", "Review", ">"),
     ("valid", "Valid%", ">"),
     ("turns", "Turns", ">"),
     ("wall", "Wall s", ">"),
@@ -38,15 +38,20 @@ def _median(block, fmt: str = "{:.3g}") -> str:
 def summary_cells(summary: dict) -> dict[str, str]:
     """One summary dict -> the string cell for each column in ``COLUMNS``."""
     n = summary.get("n_seeds", 0)
+    passed = summary.get("n_passed", 0)
+    harness = summary.get("n_harness_errors")
     valid = summary.get("valid_call_rate")
+    # Failed = ran, was graded, did not pass. Seeds the harness lost were never
+    # graded and are not failures of the agent, so they come out of the middle.
+    failed = ("--" if harness is None else str(max(0, n - passed - harness)))
     return {
         "case": str(summary.get("case", "?")),
         "model": str(summary.get("model") or summary.get("harness") or "-"),
         "seeds": str(n),
-        "ran": f"{summary.get('n_completed', 0)}/{n}",
-        "passed": f"{summary.get('n_passed', 0)}/{n}",
-        "ambig": str(summary.get("n_ambiguous", "--")),
-        "repdis": str(summary.get("n_report_disagrees", "--")),
+        "passed": f"{passed}/{n}",
+        "failed": failed,
+        "harness": "--" if harness is None else str(harness),
+        "review": str(summary.get("n_needs_review", "--")),
         "valid": ("--" if not isinstance(valid, dict) or valid.get("median") is None
                   else f"{valid['median'] * 100:.0f}"),
         "turns": _median(summary.get("turns")),
@@ -55,12 +60,13 @@ def summary_cells(summary: dict) -> dict[str, str]:
 
 
 def flags(summary: dict) -> str:
-    """``[3 ambig, 2 rep-dis]`` — empty when the pass-rate reads at face value."""
+    """``[1 harness error, 2 to review]`` — empty when the row needs no action."""
     parts = []
-    if summary.get("n_ambiguous"):
-        parts.append(f"{summary['n_ambiguous']} ambig")
-    if summary.get("n_report_disagrees"):
-        parts.append(f"{summary['n_report_disagrees']} rep-dis")
+    if summary.get("n_harness_errors"):
+        n = summary["n_harness_errors"]
+        parts.append(f"{n} harness error{'s' if n > 1 else ''}")
+    if summary.get("n_needs_review"):
+        parts.append(f"{summary['n_needs_review']} to review")
     return f"[{', '.join(parts)}]" if parts else ""
 
 
@@ -88,16 +94,18 @@ def render_terminal(summaries: list[dict], title: str = "") -> str:
 
     n_seeds = sum(s.get("n_seeds", 0) for s in summaries)
     n_passed = sum(s.get("n_passed", 0) for s in summaries)
-    n_ambig = sum(s.get("n_ambiguous") or 0 for s in summaries)
-    n_repdis = sum(s.get("n_report_disagrees") or 0 for s in summaries)
-    total = f"  {n_passed}/{n_seeds} seeds passed across {len(summaries)} cell(s)"
-    if n_ambig or n_repdis:
-        total += f" — {n_ambig} ambiguous, {n_repdis} report-disagree"
+    n_harness = sum(s.get("n_harness_errors") or 0 for s in summaries)
+    n_review = sum(s.get("n_needs_review") or 0 for s in summaries)
+    graded = n_seeds - n_harness
     out.append("")
-    out.append(total)
-    if n_ambig or n_repdis:
-        out.append("  those counts gate the pass-rate: read it at face value only "
-                   "where both are 0.")
+    out.append(f"  {n_passed}/{graded} graded seeds passed "
+               f"across {len(summaries)} cell(s)")
+    if n_harness:
+        out.append(f"  {n_harness} seed(s) lost to harness errors — NOT a result. "
+                   "Fix the cause and re-run those cases; this table is not final.")
+    if n_review:
+        out.append(f"  {n_review} seed(s) need a human look "
+                   "(`evals review`): the agent's verdict contradicts the grade.")
     return "\n".join(out)
 
 

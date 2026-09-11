@@ -79,6 +79,7 @@ scripts/evals run anchor --dry-run # preflight and plan; no agent calls, no spen
 scripts/evals run anchor --only paraboloid,pyc_turbojet
 scripts/evals status               # the table from stored results; runs nothing
 scripts/evals table                # regrade + re-render; runs nothing
+scripts/evals review               # seeds awaiting a human look
 ```
 
 An arm **is** its publication manifest — `examples/lane_c_pub_anchor.yaml` and
@@ -94,8 +95,12 @@ What the runner guarantees:
 - **A live table.** `results/campaigns/<arm>_<stamp>/table.md` is re-rendered
   after every case. A crash at case 9 still leaves 8 cases tabulated.
 - **Honest resume.** Re-running the same command skips cases that are *graded*
-  and resumes ones carrying error rows. A graded FAIL is a result and stays put;
-  an error row is an absence and comes back. Use `--force` to override.
+  and resumes ones the harness lost. That line decides re-runs: an agent that
+  performs badly earns a graded FAIL, which is a RESULT and stays put, because
+  re-running it would be sampling until the answer flatters. A harness that
+  crashes, or loses its credential or network, produces nothing to grade, and
+  re-running it is just finishing the measurement. Use `--force` to re-run
+  everything once the harness is clean.
 - **Post-run rendering.** Regrade plus `paper/make_tables.py`, on success,
   failure, and Ctrl-C alike.
 
