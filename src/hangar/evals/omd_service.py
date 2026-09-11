@@ -17,6 +17,7 @@ than sleeping blind. Server output goes to ``<data_root>/omd_server.log``.
 from __future__ import annotations
 
 import os
+import signal
 import socket
 import subprocess
 import sys
@@ -94,6 +95,13 @@ class OmdHttpService:
                  "--transport", "http", "--host", self.bind_host, "--port", str(port)],
                 stdout=log, stderr=log, stdin=subprocess.DEVNULL, env=env,
                 cwd=str(self.data_root),
+                # Own process group, so teardown can signal the server AND
+                # anything it spawned. omd runs solves in worker processes;
+                # killing only the parent orphans them, and an orphaned
+                # OpenMDAO solve keeps burning CPU long after the seed that
+                # asked for it was killed. pyc_turbojet took 2h26m of wall
+                # clock for ~45 min of agent time that way.
+                start_new_session=True,
             )
         finally:
             log.close()  # the child holds its own copy of the fd
@@ -125,12 +133,34 @@ class OmdHttpService:
             f"see {self.data_root / 'omd_server.log'}"
         )
 
+    def _signal_group(self, sig: int) -> bool:
+        """Signal the server's whole process group; False if it is already gone."""
+        try:
+            os.killpg(os.getpgid(self.proc.pid), sig)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+
     def _teardown(self) -> None:
+        """Stop the server and everything it started.
+
+        A seed's wall-clock budget bounds the AGENT, and used to bound only the
+        agent: the driver killed the container, but omd kept solving host-side
+        because the solve runs in a child the parent's SIGTERM never reached.
+        Signalling the group makes the budget bound the seed.
+
+        SIGTERM first so the server can close its DB cleanly -- the provenance
+        DB is the grading evidence, and a half-written one grades nothing --
+        then SIGKILL for anything still inside a long C-level solve, where a
+        Python signal handler will not run until the call returns.
+        """
         if self.proc is None or self.proc.poll() is not None:
             return
-        self.proc.terminate()
+        if not self._signal_group(signal.SIGTERM):
+            self.proc.terminate()
         try:
             self.proc.wait(timeout=_TERM_GRACE_S)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
+            if not self._signal_group(signal.SIGKILL):
+                self.proc.kill()
             self.proc.wait()

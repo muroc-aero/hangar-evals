@@ -157,10 +157,10 @@ def test_run_cell_applies_case_budgets_and_overrides(tmp_path):
     (tmp_path / "run_data").mkdir()
     driver = _FakeDriver("prose", db_fixture=FIXTURE_DB)
     rec = run_cell(CASES["paraboloid"], driver, "fake", "m0", 0, tmp_path)
-    assert driver.seen_max_turns == 80
-    assert driver.seen_timeout_s == 900.0
-    assert rec["telemetry"]["max_turns"] == 80
-    assert rec["telemetry"]["timeout_s"] == 900.0
+    assert driver.seen_max_turns == 100
+    assert driver.seen_timeout_s == 1100.0
+    assert rec["telemetry"]["max_turns"] == 100
+    assert rec["telemetry"]["timeout_s"] == 1100.0
     assert rec["telemetry"]["timed_out"] is False
 
     driver = _FakeDriver("prose", db_fixture=FIXTURE_DB)

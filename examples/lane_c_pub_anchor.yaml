@@ -1,7 +1,7 @@
 # Lane C agent evals — PUBLICATION run, claude anchor (Opus) — 3 seeds.
 # 11-case suite x 3 seeds/cell, sandboxed (container + http).
 # ocp_three_tool is DROPPED (needs reconfiguring to run under a uniform cap);
-# every remaining case is capped at 900s (15 min).
+# every remaining case is capped at 1100s (~18 min).
 #
 # ARMS ARE SEPARATE STUDY FILES so you can run them independently — the Opus
 # anchor draws Max-plan usage and wants a deliberate window; the local arms are
@@ -48,24 +48,24 @@ policy:
 
 cases:
   - case_id: paraboloid_claude
-    overrides: {case: paraboloid, harness: claude, seeds: 3, timeout_s: 900, omd_transport: http, sandbox: container}
+    overrides: {case: paraboloid, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
   - case_id: oas_aero_rect_claude
-    overrides: {case: oas_aero_rect, harness: claude, seeds: 3, timeout_s: 900, omd_transport: http, sandbox: container}
+    overrides: {case: oas_aero_rect, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
   - case_id: oas_aerostruct_rect_claude
-    overrides: {case: oas_aerostruct_rect, harness: claude, seeds: 3, timeout_s: 900, omd_transport: http, sandbox: container}
+    overrides: {case: oas_aerostruct_rect, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
   - case_id: ocp_caravan_basic_claude
-    overrides: {case: ocp_caravan_basic, harness: claude, seeds: 3, timeout_s: 900, omd_transport: http, sandbox: container}
+    overrides: {case: ocp_caravan_basic, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
   - case_id: ocp_caravan_full_claude
-    overrides: {case: ocp_caravan_full, harness: claude, seeds: 3, timeout_s: 900, omd_transport: http, sandbox: container}
+    overrides: {case: ocp_caravan_full, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
   - case_id: ocp_hybrid_twin_claude
-    overrides: {case: ocp_hybrid_twin, harness: claude, seeds: 3, timeout_s: 900, omd_transport: http, sandbox: container}
+    overrides: {case: ocp_hybrid_twin, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
   - case_id: oas_ocp_combined_claude
-    overrides: {case: oas_ocp_combined, harness: claude, seeds: 3, timeout_s: 900, omd_transport: http, sandbox: container}
+    overrides: {case: oas_ocp_combined, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
   - case_id: ocp_oas_coupled_claude
-    overrides: {case: ocp_oas_coupled, harness: claude, seeds: 3, timeout_s: 900, omd_transport: http, sandbox: container}
+    overrides: {case: ocp_oas_coupled, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
   - case_id: ocp_oas_direct_claude
-    overrides: {case: ocp_oas_direct, harness: claude, seeds: 3, timeout_s: 900, omd_transport: http, sandbox: container}
+    overrides: {case: ocp_oas_direct, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
   - case_id: pyc_turbojet_claude
-    overrides: {case: pyc_turbojet, harness: claude, seeds: 3, timeout_s: 900, omd_transport: http, sandbox: container}
+    overrides: {case: pyc_turbojet, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
   - case_id: evt_native_sizing_claude
-    overrides: {case: evt_native_sizing, harness: claude, seeds: 3, timeout_s: 900, omd_transport: http, sandbox: container}
+    overrides: {case: evt_native_sizing, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}

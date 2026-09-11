@@ -106,3 +106,54 @@ def test_startup_crash_raises_and_points_at_log(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: _DeadProc())
     with pytest.raises(RuntimeError, match="omd_server.log"):
         OmdHttpService(tmp_path).__enter__()
+
+
+def test_teardown_kills_the_children_the_server_spawned(tmp_path):
+    """A seed's wall-clock budget must bound the SEED, not just the agent.
+
+    It used to bound only the agent: the driver killed the container, but omd
+    kept solving host-side because the solve runs in a child that the parent's
+    SIGTERM never reached. An orphaned OpenMDAO solve burns CPU long after the
+    seed that asked for it is gone -- pyc_turbojet took 2h26m of wall clock for
+    roughly 45 minutes of agent time that way.
+
+    Stands in a sleeping grandchild for the solve: if teardown only reaches the
+    parent, it survives.
+    """
+    import os
+    import signal
+    import subprocess
+    import sys
+    import time
+
+    from hangar.evals.omd_service import OmdHttpService
+
+    marker = tmp_path / "child.pid"
+    # A parent that spawns a long-lived child and then waits, in its own group.
+    parent = subprocess.Popen(
+        [sys.executable, "-c",
+         "import subprocess, sys, time, pathlib;"
+         "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)']);"
+         f"pathlib.Path({str(marker)!r}).write_text(str(c.pid));"
+         "time.sleep(120)"],
+        start_new_session=True)
+    try:
+        for _ in range(100):          # wait for the child's pid to be published
+            if marker.exists():
+                break
+            time.sleep(0.05)
+        child_pid = int(marker.read_text())
+
+        service = OmdHttpService.__new__(OmdHttpService)   # teardown only
+        service.proc = parent
+        service._teardown()
+
+        time.sleep(0.5)
+        with pytest.raises(OSError):   # ESRCH: the grandchild went too
+            os.kill(child_pid, 0)
+    finally:
+        for pid in (parent.pid,):
+            try:
+                os.killpg(os.getpgid(pid), signal.SIGKILL)
+            except OSError:
+                pass
