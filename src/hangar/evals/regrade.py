@@ -84,6 +84,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--results-dir", type=Path, default=Path("results"))
     parser.add_argument("--out-dir", type=Path, default=None,
                         help="default: <results-dir>/regraded")
+    parser.add_argument("--quiet", action="store_true",
+                        help="print only the closing count, for callers that "
+                             "render their own table")
     args = parser.parse_args(argv)
     out_dir = args.out_dir or (args.results_dir / "regraded")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -97,6 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         target.write_text(json.dumps(summaries, indent=2))
         n_files += 1
         n_cells += len(summaries)
+        if args.quiet:
+            continue
         for s in summaries:
             flags = []
             if s["n_ambiguous"]:
