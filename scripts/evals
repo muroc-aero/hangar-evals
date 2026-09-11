@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# The single entry point for every eval run. Launch a whole arm with one
+# 1Password unlock covering it:
+#
+#   op run --env-file=op.env -- scripts/evals run anchor
+#
+# op resolves the token once and injects it into this process tree, so every
+# case inherits it and nothing prompts again for the duration.
+#
+#   scripts/evals run anchor --dry-run     preflight + plan, no agent calls
+#   scripts/evals run paper                lanes, agent column, and every arm
+#   scripts/evals run anchor --only paraboloid,pyc_turbojet
+#   scripts/evals status                   the table from stored results
+#   scripts/evals table                    regrade + re-render, run nothing
+#
+# The uv invocation exists to put the-hangar's Lane A references on the path —
+# every reference the grader compares against is computed in-process from there.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+: "${HANGAR_PROJECT:=../the-hangar}"
+exec uv run --project "$HANGAR_PROJECT" --with-editable ".[anchor]" \
+     python -m hangar.evals.campaign "$@"

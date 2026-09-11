@@ -43,7 +43,8 @@ hangar-evals/
   pyproject.toml          # dist: hangar-evals; PEP 420 hangar.evals namespace pkg
   src/hangar/evals/       # package source (leaf __init__ only)
   tests/                  # pytest suite (added alongside each step)
-  examples/               # StudyRequest YAMLs for the have-agent bridge
+  examples/               # StudyRequest YAMLs — the unit of an eval arm
+  scripts/evals           # the one entry point: run / status / table
   results/                # gitignored eval run outputs (never committed)
 ```
 
@@ -58,6 +59,49 @@ uv pip install -e ".[dev]"
 python -c "import hangar.evals; print(hangar.evals.__version__)"
 ```
 
+## Run an arm
+
+One command runs a whole arm, prints every seed as it lands, keeps a table
+current on disk, and re-renders the paper's tables when it finishes:
+
+```bash
+op run --env-file=op.env -- scripts/evals run anchor
+```
+
+`op` resolves the Claude Code token once and scopes it to that process tree, so
+a five-hour bundle needs one unlock and no further prompts. The local arms need
+no credential and no `op`:
+
+```bash
+scripts/evals run gemma            # on-device, ~14 h, free
+scripts/evals run paper            # lanes + agent column + every arm
+scripts/evals run anchor --dry-run # preflight and plan; no agent calls, no spend
+scripts/evals run anchor --only paraboloid,pyc_turbojet
+scripts/evals status               # the table from stored results; runs nothing
+scripts/evals table                # regrade + re-render; runs nothing
+```
+
+An arm **is** its publication manifest — `examples/lane_c_pub_anchor.yaml` and
+its siblings — read through the same `overrides` mapping the have-agent bridge
+uses, so a manifest means one thing whichever front door drives it. Adding an
+arm is a new YAML, not a new script.
+
+What the runner guarantees:
+
+- **Preflight before case one.** the-hangar resolves, the container runtime is
+  up, the image exists, and one live turn proves the credential — derived from
+  the manifest, so an on-device arm is never blocked on a token it does not use.
+- **A live table.** `results/campaigns/<arm>_<stamp>/table.md` is re-rendered
+  after every case. A crash at case 9 still leaves 8 cases tabulated.
+- **Honest resume.** Re-running the same command skips cases that are *graded*
+  and resumes ones carrying error rows. A graded FAIL is a result and stays put;
+  an error row is an absence and comes back. Use `--force` to override.
+- **Post-run rendering.** Regrade plus `paper/make_tables.py`, on success,
+  failure, and Ctrl-C alike.
+
+Each run leaves `table.md`, `manifest.json` (what ran, at which SHA, with what
+outcome), and `campaign.log` under `results/campaigns/<arm>_<stamp>/`.
+
 ## Run as a have-agent study
 
 `src/hangar/evals/have_bridge.py` plugs the eval runner into the sibling
@@ -68,6 +112,13 @@ cell (case x harness x model, N seeds), executed through the same
 `results/`, so `paper/make_tables.py` in the-hangar consumes study-produced
 rows exactly like manual runs — have-agent adds leases, retries, policy
 gates, and a briefing on top, never a second source of truth for scores.
+
+This path and `scripts/evals` read the SAME manifests and call the same
+`run_matrix`; they differ in what surrounds a cell. Use the campaign runner
+for a publication arm you want to start and walk away from, and the study
+substrate when you want leases, retries, and human approval gates. The
+control plane needs the `have` CLI installed; the campaign runner needs
+nothing beyond this repo.
 
 ```bash
 # worker env = the-hangar project env (Lane A refs compute in-process)
