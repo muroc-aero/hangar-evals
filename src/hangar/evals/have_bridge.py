@@ -97,6 +97,9 @@ class LaneCEvalExecutor:
         self.sandbox = sandbox
 
     def _config(self, ov: dict[str, Any]) -> RunConfig:
+        return config_from_overrides(ov, self)
+
+    def _config_impl(self, ov: dict[str, Any]) -> RunConfig:
         unknown = set(ov) - _CELL_KEYS
         if unknown:
             raise ValueError(
@@ -188,6 +191,16 @@ class LaneCEvalExecutor:
                 "per_metric_pass": s.per_metric_pass,
             },
         )
+
+
+def config_from_overrides(ov: dict[str, Any], defaults: Any) -> RunConfig:
+    """One manifest ``overrides`` mapping -> a ``RunConfig``.
+
+    Shared by the have-agent executor and the campaign runner so a manifest
+    means the same thing whichever drives it. ``defaults`` is anything carrying
+    the executor-level attributes (``seeds``, ``model``, ``results_dir``, ...).
+    """
+    return LaneCEvalExecutor._config_impl(defaults, ov)
 
 
 class LaneCEvalCheckSuite:

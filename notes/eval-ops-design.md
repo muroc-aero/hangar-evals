@@ -1,6 +1,6 @@
 # Eval-Ops Design — secrets, agentic runs, and the-tower
 
-**Status:** DRAFT for review. No code yet. Written 2026-08-10.
+**Status:** DRAFT of 2026-08-10, partially superseded — see §0.1.
 **Scope:** Fix how we launch, credential, and watch Lane C eval batches so a
 publication run is *one governed action* + *a live view*, not hand-rolled bash,
 copy-pasted tokens, and `tail -f | grep`.
@@ -36,6 +36,45 @@ The three fixes:
    `muroc.db`, giving a live web view of every job's queued/running/done/failed
    state. `have status` / `have events --follow` is the terminal "tower-lite" we
    already have. No W&B, no bespoke dashboard, no tqdm-as-the-answer.
+
+---
+
+## 0.1 Status, 2026-09-11 — Path A retired, Path B's manifest kept
+
+Axis A (secrets) shipped as designed: `op run --env-file=op.env` resolves the
+token once per process tree, `op.env` holds references only, and the container
+still receives it through a bare `-e` passthrough.
+
+Axis B (running) did **not** ship as Option 1/2. What shipped is
+`src/hangar/evals/campaign.py` + `scripts/evals` — an in-process executor that
+reads **the same `examples/lane_c_pub_*.yaml` manifests** through the same
+`overrides` mapping as the bridge (`have_bridge.config_from_overrides`). So the
+central claim of this note holds — *the manifest is the unit; adding an arm is a
+new YAML, not a new script* — while the control plane it assumed does not yet
+exist here: `have` is not installed on the dev machine, and the approval gates
+are a poor fit for the actual need, which was to start a five-hour arm and walk
+away from it.
+
+Path A is gone regardless: `scripts/_run_lib.sh`, `scripts/_done.py`, and
+`scripts/run_qwen_chunk*.sh` are deleted, and `scripts/run_{anchor,gemma,qwen}.sh`
+are one-line shims. `configs/lane_c_*/` survives for single-case work with the
+direct runner (`--config`), and is no longer what an arm is made of.
+
+Two things this note got right that the bash loop had been getting wrong, and
+which the runner now enforces:
+
+* **Preflight is not optional.** A stale token converted a bundle into error
+  rows; the probe is now derived from the manifest and re-run between cases.
+* **Idempotency needs the records, not the summary.** `_done.py` asked whether
+  a cell had `n_seeds >= seeds`, and an error row counts as a seed — so seven
+  seeds of the 2026-09-10 anchor arm were skipped rather than retried on every
+  later run. `results_index.case_status` reads the records and distinguishes a
+  graded FAIL (a result) from an error row (an absence).
+
+Axis C (monitoring) is unchanged and unbuilt. The stopgap is the live
+`results/campaigns/<arm>_<stamp>/table.md` plus `scripts/evals status`; pointing
+the range-safety dashboard at a control-plane DB remains the plan if and when
+one exists.
 
 ---
 

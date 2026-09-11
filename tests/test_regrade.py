@@ -1,9 +1,9 @@
 """Offline re-derivation of cell summaries from stored records.
 
-The counts under test exist to stop an ORDER-DEPENDENT score from reading as a
-clean fail: the oracle grades the last successful run of the matching mode, and
-several Lane C prompts ask for a comparison run, so an agent that obeys can
-leave a control run last. These tests pin the counting, not any verdict --
+Two families, deliberately separated. ``extra_counts`` reports OUTCOMES that
+belong in the results table: seeds the harness lost, and seeds a person has to
+adjudicate. ``harness_health`` reports defects in the apparatus, which belong in
+a fix and never in the table. These tests pin the counting, not any verdict --
 re-grading must never silently change a pass or a fail.
 """
 
@@ -11,7 +11,12 @@ from __future__ import annotations
 
 import json
 
-from hangar.evals.regrade import extra_counts, load_records, regrade_file
+from hangar.evals.regrade import (
+    extra_counts,
+    harness_health,
+    load_records,
+    regrade_file,
+)
 
 
 def _rec(seed, passed=True, ambiguity=0, reported=None, case="paraboloid"):
@@ -29,22 +34,43 @@ def _rec(seed, passed=True, ambiguity=0, reported=None, case="paraboloid"):
     return rec
 
 
-def test_counts_ambiguous_seeds_without_touching_verdicts():
+def test_a_contradicted_grade_is_routed_to_a_person():
     recs = [_rec(0, passed=False, ambiguity=2, reported=True),
             _rec(1, passed=True, ambiguity=0, reported=True)]
-    assert extra_counts(recs) == {"n_ambiguous": 1, "n_report_disagrees": 1}
+    assert extra_counts(recs) == {"n_harness_errors": 0, "n_needs_review": 1}
 
 
-def test_ambiguity_alone_is_not_a_disagreement():
-    # The observed ocp_oas_coupled shape: the skipped run existed, but the
+def test_an_agreeing_report_needs_no_review():
+    # The observed ocp_oas_coupled shape: a same-mode run was skipped, but the
     # last one was the right one, so the grade and the report still agree.
     recs = [_rec(0, passed=True, ambiguity=3, reported=True)]
-    assert extra_counts(recs) == {"n_ambiguous": 1, "n_report_disagrees": 0}
+    assert extra_counts(recs)["n_needs_review"] == 0
 
 
-def test_unparsed_report_is_not_counted_as_disagreeing():
+def test_an_unparsed_report_cannot_contradict_anything():
     recs = [_rec(0, passed=False, ambiguity=0, reported=None)]
-    assert extra_counts(recs)["n_report_disagrees"] == 0
+    assert extra_counts(recs)["n_needs_review"] == 0
+
+
+def test_an_error_row_counts_as_a_harness_error():
+    # The only failure that earns a re-run: nothing was measured.
+    err = _rec(0, passed=False)
+    err["error"] = {"type": "HarnessError", "message": "exited 1, no runs"}
+    assert extra_counts([err, _rec(1)])["n_harness_errors"] == 1
+
+
+def test_harness_health_is_reported_separately_from_results():
+    # Ambiguity is a defect in the apparatus. It is still measured, so it can
+    # be fixed -- but it is not an outcome and never reaches the table.
+    recs = [_rec(0, passed=True, ambiguity=3, reported=True), _rec(1)]
+    assert harness_health(recs)["n_ambiguous"] == 1
+    assert "n_ambiguous" not in extra_counts(recs)
+
+
+def test_harness_health_counts_a_graded_run_that_crashed_on_the_way():
+    degraded = _rec(0, passed=True, reported=True)
+    degraded["telemetry"]["exit_code"] = 1
+    assert harness_health([degraded])["n_degraded"] == 1
 
 
 def test_load_records_keeps_the_retry_not_the_superseded_row(tmp_path):
@@ -65,5 +91,7 @@ def test_regrade_file_summarises_per_cell_and_preserves_pass_count(tmp_path):
     [summary] = regrade_file(p)
     assert summary["n_seeds"] == 2
     assert summary["n_passed"] == 1          # unchanged by re-grading
-    assert summary["n_ambiguous"] == 2
-    assert summary["n_report_disagrees"] == 1
+    assert summary["n_needs_review"] == 1
+    assert summary["n_harness_errors"] == 0
+    # The apparatus defect rides along for fixing, outside the result fields.
+    assert summary["harness_health"]["n_ambiguous"] == 2
