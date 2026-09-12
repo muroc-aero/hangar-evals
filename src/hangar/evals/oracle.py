@@ -14,12 +14,30 @@ DB (``analysis.db``) that every seed already captures under its ``data_root``:
     (``run.py:_record_assessment``), so it is robust to agents naming plans
     arbitrarily.
 
-Grading policy (spec §4c): per metric, select the agent's **last successful**
-run of the matching mode — the final answer-by-action. Deliberately NOT
-best-of-all-runs (spray-and-pray must not pay), and no successful run of the
-required mode means the metric value is ``None`` → a required metric FAILs.
-That makes "pass by doing nothing" (and pass-by-forged-report) structurally
-impossible: with no successful execute there is nothing to grade.
+Grading policy (spec §4c, revised 2026-09-12): per metric, grade the run the
+agent **named** in its report's ``run_id``, provided that run really executed
+and matches the metric's mode. Failing that, fall back to its last successful
+run of the matching mode.
+
+Selecting by name, not by position, is what the earlier policy got wrong. The
+2026-09-11 anchor arm produced four seeds where the agent reported the correct
+answer and then kept working — a 500 NM sensitivity sweep on a 250 NM task, a
+surrogate wing model after the live one, a looser re-solve — and "last run"
+graded the exploration instead of the answer. Each of those seeds scored FAIL
+on work that was right.
+
+The anti-spray-and-pray property survives intact, because naming a run is not
+choosing an answer: the numbers still come from the provenance DB, never from
+the report's own figures, so a run the agent names but never made, or made and
+failed, grades nothing. What the agent gains is the ability every engineer has
+— to say which run is the result. What it cannot do is claim a number its runs
+did not produce. Cherry-picking stays visible: ``n_executed_ok`` and
+``oracle_ambiguity`` record how many runs it took to get there.
+
+No successful run of the required mode means the metric value is ``None`` → a
+required metric FAILs. That makes "pass by doing nothing" (and
+pass-by-forged-report) structurally impossible: with no successful execute
+there is nothing to grade.
 
 The fenced-JSON self-report is scored separately as *reporting fidelity*
 (``report_matches_effects``): did the agent report the numbers its own runs
@@ -181,14 +199,54 @@ def _assess_values(meta: dict) -> dict:
     return values
 
 
-def select_run(runs: list[EffectRun], mode: str) -> EffectRun | None:
-    """The LAST successful run of ``mode`` — the agent's final answer-by-action."""
+# How a metric's run was chosen — recorded per seed so a fallback is visible.
+NAMED = "named"                  # the agent's reported run_id, and it qualified
+FALLBACK_LAST = "fallback_last"  # no usable run_id; took the last successful run
+NOTHING = "nothing"              # no successful run of the mode at all
+
+
+def select_run(
+    runs: list[EffectRun], mode: str, reported_run_id: str | None = None
+) -> EffectRun | None:
+    """The run the agent named, else its LAST successful run of ``mode``.
+
+    A reported id only counts if it names a run that actually executed OK in
+    the required mode: an id for a failed run, a run of the wrong mode, or a
+    run that never happened falls through to the positional rule rather than
+    grading nothing.
+    """
     candidates = [r for r in runs if r.executed_ok and r.mode == mode]
-    return candidates[-1] if candidates else None
+    if not candidates:
+        return None
+    if reported_run_id:
+        for r in candidates:
+            if r.run_id == reported_run_id:
+                return r
+    return candidates[-1]
+
+
+def selection_basis(
+    metrics: list[Metric], runs: list[EffectRun], reported_run_id: str | None = None
+) -> str:
+    """How the graded runs were chosen: ``NAMED``, ``FALLBACK_LAST``, ``NOTHING``.
+
+    ``FALLBACK_LAST`` is the one worth watching. It means the agent finished
+    without naming a run we could grade, so the policy guessed — which is
+    exactly the situation that cost the 2026-09-11 arm four seeds.
+    """
+    modes = {MODE_BY_MODULE[m.lane_a_module] for m in metrics}
+    chosen = [select_run(runs, mode, reported_run_id) for mode in sorted(modes)]
+    if not any(chosen):
+        return NOTHING
+    named = reported_run_id and any(
+        r is not None and r.run_id == reported_run_id for r in chosen)
+    return NAMED if named else FALLBACK_LAST
 
 
 def effect_values(
-    metrics: list[Metric], runs: list[EffectRun]
+    metrics: list[Metric],
+    runs: list[EffectRun],
+    reported_run_id: str | None = None,
 ) -> dict[str, float | None]:
     """Per-metric values from the selected runs (``None`` = nothing to grade).
 
@@ -204,7 +262,7 @@ def effect_values(
     """
     out: dict[str, float | None] = {}
     for m in metrics:
-        run = select_run(runs, MODE_BY_MODULE[m.lane_a_module])
+        run = select_run(runs, MODE_BY_MODULE[m.lane_a_module], reported_run_id)
         got = _lookup(run, m.effect_key or m.lane_a_key) if run else None
         out[m.key] = float(got) if _is_scalar(got) else None
     return out
@@ -223,11 +281,13 @@ def _lookup(run: EffectRun, key: str):
 
 
 def oracle_ambiguity(metrics: list[Metric], runs: list[EffectRun]) -> int:
-    """How many successful mode-matching runs the selection SKIPPED.
+    """How many successful mode-matching runs the selection did NOT grade.
 
-    Nonzero means the agent produced several graded-mode runs and we took the
-    last per policy — logged into the record (spec §4c risk 1), never silently
-    resolved.
+    This is an iteration count, not a defect: an agent that runs, inspects,
+    adjusts and re-runs will show several, and the one it names is the answer.
+    It stays in the record (spec §4c risk 1) so cherry-picking is visible —
+    read it alongside ``selection_basis``, which says whether the agent named
+    its answer or the policy had to guess.
     """
     modes = {MODE_BY_MODULE[m.lane_a_module] for m in metrics}
     skipped = 0

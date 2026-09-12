@@ -68,6 +68,7 @@ from hangar.evals.oracle import (
     oracle_ambiguity,
     read_effect_runs,
     report_matches_effects,
+    selection_basis,
 )
 from hangar.evals.scoring import (
     compute_refs,
@@ -239,15 +240,24 @@ def run_cell(
     # produced. No successful run of a metric's mode -> that metric FAILs, so
     # a no-op (or forged-report) run cannot pass.
     runs = read_effect_runs(db) if db.exists() else []
-    effects = effect_values(case.metrics, runs)
-    effect_score = score_values(case.metrics, effects, refs)
-    completed = any(r.executed_ok for r in runs)
 
-    # SECONDARY — reporting fidelity: did it also SAY what it did?
+    # The report is parsed BEFORE grading, for its ``run_id`` only: the agent
+    # names which of its runs is the answer, and the oracle grades that run's
+    # effects. The report's own numbers are never trusted here — they are
+    # scored separately below.
     try:
         report = extract_report(result.final_text)
     except ValueError:
         report = None
+    reported_run_id = (report or {}).get("run_id")
+    if not isinstance(reported_run_id, str):
+        reported_run_id = None
+
+    effects = effect_values(case.metrics, runs, reported_run_id)
+    effect_score = score_values(case.metrics, effects, refs)
+    completed = any(r.executed_ok for r in runs)
+
+    # SECONDARY — reporting fidelity: did it also SAY what it did?
     report_score = (
         score_report(for_reporting(case.metrics), report, refs)
         if report is not None else None
@@ -290,6 +300,8 @@ def run_cell(
             "n_runs": len(runs),
             "n_executed_ok": sum(r.executed_ok for r in runs),
             "ambiguity": oracle_ambiguity(case.metrics, runs),
+            "reported_run_id": reported_run_id,
+            "selection": selection_basis(case.metrics, runs, reported_run_id),
             "runs": [
                 {"run_id": r.run_id, "mode": r.mode,
                  "executed_ok": r.executed_ok, "assess_status": r.assess_status}

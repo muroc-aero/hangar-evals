@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Re-score stored records under the current grading policy. No agent re-runs,
+# no credential, no spend -- see "Re-score an arm without re-running it".
+set -euo pipefail
+cd "$(dirname "$0")/.."
+: "${HANGAR_PROJECT:=../the-hangar}"
+exec uv run --project "$HANGAR_PROJECT" --with-editable ".[anchor]" \
+     python -m hangar.evals.reselect "$@"

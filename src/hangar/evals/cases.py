@@ -55,6 +55,13 @@ End your final message with exactly one fenced JSON block:
 Report every metric at full precision (all digits the tools give you).
 If a metric is not retrievable through the tools, set it to null and
 explain in "friction". Do not round, do not omit keys.
+
+"run_id" is the run being graded, so it must be the run that produced the
+numbers above. Iterate as much as the task needs -- but once you have the
+answer, report it and stop. Do not run anything further: no sensitivity
+sweeps, no variants, no re-solves on different settings. If you do run
+something after the run you report, you are reporting a run that is no
+longer your last.
 """
 
 
