@@ -107,6 +107,32 @@ What the runner guarantees:
 Each run leaves `table.md`, `manifest.json` (what ran, at which SHA, with what
 outcome), and `campaign.log` under `results/campaigns/<arm>_<stamp>/`.
 
+## When a seed exits nonzero
+
+A nonzero `telemetry.exit_code` is reported by the harness-health banner and
+never changes a verdict. The one seen repeatedly on the anchor is **not** a
+harness defect and must not be "fixed":
+
+```
+API Error: Connection closed mid-response
+terminal_reason: api_error
+```
+
+The upstream API drops the connection while the final message streams. The
+agent's tool calls already happened and were recorded, so the run is gradable
+from its provenance DB -- what is lost is the agent's own report, which costs
+the reporting-fidelity score for that seed and nothing else. Three seeds of
+`ocp_hybrid_twin` landed this way and still graded PASS.
+
+The expensive part is the timeout: the CLI hangs for roughly 15 minutes per
+drop before giving up. That is why `ocp_hybrid_twin` spent 78 of 91 wall-clock
+minutes stalled on 13 minutes of actual agent work. Budget for it, or expect
+an arm's wall clock to be dominated by drops rather than by analysis.
+
+This is a condition to report, not a defect to repair. A seed the harness
+genuinely lost -- crash, credential, network -- is a different thing: it
+grades nothing, counts as `Lost`, and the arm needs re-running.
+
 ## What gets graded
 
 The grade is the run the agent **named** in its report's `run_id`, read from
