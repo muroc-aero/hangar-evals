@@ -461,21 +461,22 @@ def _finish(name: str, summaries: list[dict], out_dir: Path, results_dir: Path,
     # Harness health is kept OUT of the results table on purpose: these are
     # defects in the measurement, and a defect belongs in a fix, not in every
     # future reader's way. The target is a forced re-run that reports none.
-    health = {"n_ambiguous": 0, "n_degraded": 0}
+    health = {"n_unnamed_selection": 0, "n_degraded": 0}
     for cell in summaries:
         for key, value in (cell.get("harness_health") or {}).items():
             health[key] = health.get(key, 0) + value
     if any(health.values()):
-        print("\n== harness health (fix these, do not annotate them)")
-        if health["n_ambiguous"]:
-            print(f"   {health['n_ambiguous']} seed(s) scored on whichever "
-                  "same-mode run ran LAST — prompts that ask for a comparison "
-                  "run against a policy that grades the last one.")
+        print("\n== harness health")
+        if health["n_unnamed_selection"]:
+            print(f"   {health['n_unnamed_selection']} seed(s) finished without "
+                  "naming a gradable run, so the policy graded the last one on "
+                  "the agent's behalf. Fix: the report's run_id is required.")
         if health["n_degraded"]:
             print(f"   {health['n_degraded']} seed(s) graded but their harness "
-                  "exited abnormally on the way.")
-        print("   Neither changed a verdict. Both mean this arm is not yet a "
-              "clean measurement — re-run with --force once fixed.")
+                  "exited abnormally on the way. Check the cause before "
+                  "re-running: an upstream API drop is a condition to report, "
+                  "not a defect to fix.")
+        print("   Neither changed a verdict.")
 
     print(f"\n   table.md   {out_dir / 'table.md'}")
     print(f"   manifest   {out_dir / 'manifest.json'}")

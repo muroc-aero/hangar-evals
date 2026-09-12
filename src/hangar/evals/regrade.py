@@ -70,21 +70,39 @@ def extra_counts(records: list[dict]) -> dict[str, int]:
 def harness_health(records: list[dict]) -> dict[str, int]:
     """Defects in the MEASUREMENT, for fixing — never for the results table.
 
-    ``n_ambiguous`` counts seeds whose score depended on which of the agent's
-    same-mode runs happened to execute last. ``n_degraded`` counts seeds that
-    graded but whose harness exited abnormally on the way. Both mean the
-    apparatus is imperfect, not that the agent is: a run with either is a
-    candidate for a re-run once the cause is fixed, and the goal is a forced
-    re-run that reports zero of both.
+    ``n_unnamed_selection`` counts seeds where the agent finished without
+    naming a gradable run AND had run more than one, so the policy had to pick
+    one for it. That is a defect worth fixing. Several same-mode runs on their
+    own are NOT: an agent that runs, inspects, adjusts and re-runs is working
+    properly, and since 2026-09-12 the run it names is the one graded.
+
+    ``n_degraded`` counts seeds that graded but whose harness exited abnormally
+    on the way. Not every cause is ours to fix -- the 2026-09-11 arm's four
+    were upstream API connection drops -- so this is a condition to report,
+    not automatically a re-run.
+
+    Neither changes a verdict.
     """
     return {
-        "n_ambiguous": sum(
-            1 for r in records
-            if ((r.get("oracle") or {}).get("ambiguity") or 0) > 0),
+        "n_unnamed_selection": sum(1 for r in records if _guessed_selection(r)),
         "n_degraded": sum(
             1 for r in records
             if (r.get("telemetry") or {}).get("exit_code")),
     }
+
+
+def _guessed_selection(record: dict) -> bool:
+    """Did the policy have to choose the graded run on the agent's behalf?
+
+    Records written before the 2026-09-12 selection change carry no
+    ``selection`` key; for those, every multi-run seed was chosen positionally,
+    which is what ``ambiguity`` already said.
+    """
+    oracle = record.get("oracle") or {}
+    ambiguous = (oracle.get("ambiguity") or 0) > 0
+    if "selection" not in oracle:
+        return ambiguous
+    return ambiguous and oracle["selection"] == "fallback_last"
 
 
 def regrade_file(records_path: Path) -> list[dict]:
