@@ -24,6 +24,7 @@ from hangar.evals.oracle import (
     read_effect_runs,
     report_matches_effects,
     select_run,
+    selection_basis,
 )
 from hangar.evals.scoring import for_reporting, score_values
 
@@ -104,7 +105,7 @@ def test_noop_empty_db_fails_every_required_metric(tmp_path):
     assert all(s.verdict == "FAIL" for s in score.scores)  # incl. opt_x/opt_y
 
 
-# --- selection policy: last successful run of the mode ----------------------
+# --- selection policy: the run the agent named, else the last one -----------
 
 
 def test_last_successful_run_of_mode_wins_not_best():
@@ -119,6 +120,59 @@ def test_last_successful_run_of_mode_wins_not_best():
     assert effects["opt_f_xy"] == -5.0                    # graded value is r2's
     # And the skipped candidate is surfaced, never silently resolved.
     assert oracle_ambiguity(METRICS, runs) == 1
+
+
+def test_named_run_is_graded_not_the_last_one():
+    """The 2026-09-11 regression: right answer, then more work, graded FAIL.
+
+    Four anchor seeds reported a correct result and kept going -- a 500 NM
+    sweep on a 250 NM task, a surrogate after the live solve. Under the old
+    rule the exploration was the grade.
+    """
+    answer = {"f_xy": -82 / 3, "x": 20 / 3, "y": -22 / 3}
+    exploration = {"f_xy": -5.0, "x": 0.0, "y": 0.0}
+    runs = [
+        _run("r1", at="2026-01-01T00:00:00", values=answer),
+        _run("r2", at="2026-01-01T00:01:00", values=exploration),
+    ]
+    assert select_run(runs, "optimize", "r1").run_id == "r1"
+    assert effect_values(METRICS, runs, "r1")["opt_f_xy"] == -82 / 3
+    assert selection_basis(METRICS, runs, "r1") == "named"
+    # The iteration is still recorded -- naming a run does not hide the rest.
+    assert oracle_ambiguity(METRICS, runs) == 1
+
+
+def test_naming_a_run_cannot_conjure_a_value():
+    """Naming is not claiming: an id for a run that failed, ran in the wrong
+    mode, or never happened falls back -- it never grades numbers the agent's
+    runs did not produce."""
+    good = {"f_xy": -82 / 3, "x": 20 / 3, "y": -22 / 3}
+    runs = [
+        _run("r1", at="2026-01-01T00:00:00", values=good),
+        _run("r2", ok=False, at="2026-01-01T00:01:00", values={"f_xy": -999.0}),
+        _run("r3", mode="analysis", at="2026-01-01T00:02:00",
+             values={"f_xy": -999.0}),
+    ]
+    for bogus in ("r2", "r3", "run-that-never-ran", "", None):
+        assert select_run(runs, "optimize", bogus).run_id == "r1"
+    # A fallback is recorded as such, so a guess is never mistaken for a choice.
+    assert selection_basis(METRICS, runs, "run-that-never-ran") == "fallback_last"
+
+
+def test_unnamed_run_still_falls_back_to_last():
+    """No report, or a report without a run_id: the positional rule stands."""
+    runs = [
+        _run("r1", at="2026-01-01T00:00:00", values={"f_xy": -82 / 3}),
+        _run("r2", at="2026-01-01T00:01:00", values={"f_xy": -5.0}),
+    ]
+    assert select_run(runs, "optimize").run_id == "r2"
+    assert effect_values(METRICS, runs)["opt_f_xy"] == -5.0
+    assert selection_basis(METRICS, runs) == "fallback_last"
+
+
+def test_selection_basis_reports_nothing_to_grade():
+    runs = [_run("r1", ok=False, values={"f_xy": -82 / 3})]
+    assert selection_basis(METRICS, runs, "r1") == "nothing"
 
 
 def test_failed_and_modeless_runs_are_not_gradable():
