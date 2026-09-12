@@ -107,6 +107,43 @@ What the runner guarantees:
 Each run leaves `table.md`, `manifest.json` (what ran, at which SHA, with what
 outcome), and `campaign.log` under `results/campaigns/<arm>_<stamp>/`.
 
+## What gets graded
+
+The grade is the run the agent **named** in its report's `run_id`, read from
+the omd provenance DB — the effects of that run, never the numbers the report
+claims for it. If the agent names no gradable run, the last successful run of
+the right mode is used instead, and the seed is marked as having had its run
+chosen for it.
+
+Naming a run is not choosing an answer. A named run that failed, ran in the
+wrong mode, or never happened grades nothing, so a report cannot conjure a
+result its runs did not produce. Cherry-picking stays visible: every seed
+records how many successful runs it made.
+
+Before 2026-09-12 the policy was positional — the last successful run, full
+stop — and it cost the 2026-09-11 anchor arm four seeds. Each had reported the
+right answer and then kept working (a 500 NM sweep on a 250 NM task, a
+surrogate wing model after the live one), and the exploration was what got
+graded.
+
+## Re-score an arm without re-running it
+
+A verdict is a pure function of the provenance DB, the named run, and the
+Lane A references — none of which involve the model. So a change in grading
+policy can be applied to arms that already ran:
+
+```bash
+scripts/evals-reselect --campaign results/campaigns/anchor_<stamp>/manifest.json --dry-run
+scripts/evals-reselect --campaign results/campaigns/anchor_<stamp>/manifest.json
+python -m hangar.evals.regrade --results-dir results    # re-derive summaries
+```
+
+This is not a re-run and must not be reported as one: the agent's work is
+untouched and no tokens are spent, only our reading of it changes. Every
+rewritten record carries a `reselect` stamp saying which policy produced it.
+It needs the seed's `data_root` and its workspace `claude_events.jsonl`; a
+seed missing either keeps the grade it has and is reported as skipped.
+
 ## Run as a have-agent study
 
 `src/hangar/evals/have_bridge.py` plugs the eval runner into the sibling
