@@ -13,6 +13,24 @@ from pathlib import Path
 from typing import Protocol
 
 
+def _pyc_deck_cache_env() -> dict[str, str]:
+    """``HANGAR_PYC_DECK_CACHE`` for the omd server: the caller's own setting
+    wins; else the-hangar's ``hangar_data/pyc_decks``; nothing if the-hangar
+    does not resolve (the server then falls back to its per-run data root)."""
+    import os
+
+    explicit = os.environ.get("HANGAR_PYC_DECK_CACHE")
+    if explicit:
+        return {"HANGAR_PYC_DECK_CACHE": explicit}
+    try:
+        from hangar.evals.hangar_ref import resolve_hangar_repo
+
+        repo = resolve_hangar_repo()
+    except Exception:  # noqa: BLE001 -- absence is the fallback, not an error
+        return {}
+    return {"HANGAR_PYC_DECK_CACHE": str(repo / "hangar_data" / "pyc_decks")}
+
+
 @dataclass(frozen=True)
 class MCPServerSpec:
     """An MCP server an agent connects to — stdio child or remote HTTP.
@@ -58,6 +76,11 @@ class MCPServerSpec:
                 # pin it under data_root so no run scatters state into
                 # whatever directory the server happened to start in.
                 "HANGAR_DATA_DIR": str(data_root / "hangar_data"),
+                # ...except the pyCycle engine-deck cache (avy_three_tool):
+                # a deck is a pure function of its spec + pyCycle version and
+                # costs a ~4 min sweep, so every run shares the-hangar's own
+                # cache -- the same files its Lane A reference reads.
+                **_pyc_deck_cache_env(),
             },
         )
 

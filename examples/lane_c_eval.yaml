@@ -1,4 +1,4 @@
-# Lane C agent evals as a have-agent study — the full 12-case suite,
+# Lane C agent evals as a have-agent study — the full 14-case suite,
 # Claude anchor arm, 1 seed per cell.
 #
 # Each case below is one eval CELL (case × harness × model); the bridge
@@ -70,3 +70,7 @@ cases:
     overrides: {case: ocp_three_tool, harness: claude, seeds: 1}
   - case_id: evt_native_sizing_claude
     overrides: {case: evt_native_sizing, harness: claude, seeds: 1}
+  - case_id: avy_single_aisle_claude
+    overrides: {case: avy_single_aisle, harness: claude, seeds: 1}
+  - case_id: avy_three_tool_claude
+    overrides: {case: avy_three_tool, harness: claude, seeds: 1}

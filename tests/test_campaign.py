@@ -69,7 +69,7 @@ def test_overrides_reach_the_runconfig(tmp_path):
 
 def test_the_real_anchor_manifest_is_an_all_claude_container_arm(tmp_path):
     _, cells = load_manifest(manifest_path("anchor"), tmp_path)
-    assert len(cells) == 11
+    assert len(cells) == 13   # 11 + the two Aviary cases (2026-09-20)
     assert {h for _, c in cells for h in c.harnesses} == {"claude"}
     assert {c.sandbox for _, c in cells} == {"container"}
 

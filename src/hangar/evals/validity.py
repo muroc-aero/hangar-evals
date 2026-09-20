@@ -262,6 +262,33 @@ async def _evt_native_sizing(call: ToolCaller, sh: dict) -> None:
     await _assemble_and_run(call, d)
 
 
+async def _avy_single_aisle(call: ToolCaller, sh: dict) -> None:
+    # Mirrors test_parity_lane_c.TestAvySingleAisleLaneC: one avy/Sizing
+    # component, run in optimize mode (the component brings its own DVs).
+    d = await _init(call, "validity-avy-single-aisle", "Aviary single-aisle sizing")
+    await call("plan_add_component", plan_dir=d, comp_id="aviary",
+               comp_type="avy/Sizing",
+               config={"deck": sh["DECK"],
+                       "phase_info_module": sh["PHASE_INFO_MODULE"],
+                       "target_range_nm": sh["TARGET_RANGE_NM"],
+                       "optimizer": sh["OPTIMIZER"], "max_iter": sh["MAX_ITER"]})
+    await _assemble_and_run(call, d, mode="optimize")
+
+
+async def _avy_three_tool(call: ToolCaller, sh: dict) -> None:
+    # Mirrors TestAvyThreeToolLaneC: external_subsystems (OAS wingbox wing
+    # mass) and engine_deck (pyCycle HBTF sweep) are plain config keys.
+    d = await _init(call, "validity-avy-three-tool", "Aviary + OAS + pyCycle sizing")
+    await call("plan_add_component", plan_dir=d, comp_id="aviary",
+               comp_type="avy/Sizing",
+               config={"deck": sh["DECK"],
+                       "phase_info_module": sh["PHASE_INFO_MODULE"],
+                       "external_subsystems": [{"name": sh["SUBSYSTEM"]}],
+                       "engine_deck": sh["ENGINE_DECK"],
+                       "optimizer": sh["OPTIMIZER"], "max_iter": sh["MAX_ITER"]})
+    await _assemble_and_run(call, d, mode="optimize")
+
+
 @dataclass(frozen=True)
 class Baseline:
     """A case's scripted proof: which shared constants it needs, and the
@@ -287,6 +314,12 @@ BASELINES: dict[str, Baseline] = {
     "ocp_three_tool": Baseline(
         ("MISSION", "VLM_CONFIG", "PYC_SURR_CONFIG"), _ocp_three_tool),
     "evt_native_sizing": Baseline((), _evt_native_sizing),
+    "avy_single_aisle": Baseline(
+        ("DECK", "PHASE_INFO_MODULE", "TARGET_RANGE_NM", "OPTIMIZER", "MAX_ITER"),
+        _avy_single_aisle),
+    "avy_three_tool": Baseline(
+        ("DECK", "PHASE_INFO_MODULE", "SUBSYSTEM", "ENGINE_DECK", "OPTIMIZER",
+         "MAX_ITER"), _avy_three_tool),
 }
 
 

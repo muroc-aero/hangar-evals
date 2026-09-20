@@ -1,6 +1,6 @@
 """Task-validity runner (Step 15): registry totality, parsing, one live proof.
 
-The full 12-case sweep is a CLI activity (``python -m hangar.evals.validity
+The full 14-case sweep is a CLI activity (``python -m hangar.evals.validity
 --all``), not a test: the coupled OCP/OAS cases run solver stacks for minutes.
 The suite pins the cheap invariants plus ONE live end-to-end baseline
 (paraboloid, slow) so the wire path — MCP HTTP client -> OmdHttpService ->

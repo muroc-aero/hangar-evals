@@ -1,0 +1,13 @@
+{
+  "case": "avy_three_tool",
+  "harnesses": [
+    "claude"
+  ],
+  "model": "claude-opus-5",
+  "seeds": 3,
+  "max_turns": 100,
+  "timeout_s": 2700,
+  "results_dir": "results",
+  "omd_transport": "http",
+  "sandbox": "container"
+}
