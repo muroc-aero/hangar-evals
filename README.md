@@ -192,7 +192,7 @@ nothing beyond this repo.
 # worker env = the-hangar project env (Lane A refs compute in-process)
 #   + have-agent (the CLI) + this package with the [anchor] extra
 HAVE="uv run --project ../the-hangar --with ../have-agent --with-editable .[anchor]"
-$HAVE have --db muroc.db submit examples/lane_c_eval.yaml   # full 12-case suite
+$HAVE have --db muroc.db submit examples/lane_c_eval.yaml   # full 14-case suite
 $HAVE have --db muroc.db approve <study_id>
 $HAVE have --db muroc.db worker run --id worker:evals-1 --solvers evals \
     --executor hangar.evals.have_bridge:make_worker \
@@ -206,7 +206,7 @@ only harness crashes and malformed payloads fail the job itself. See the
 header of `examples/lane_c_eval.yaml` for prerequisites.
 
 For the fully sandboxed run — every agent in a container, both arms —
-submit `examples/lane_c_eval_sandboxed.yaml` instead: 24 cells, the 12-case
+submit `examples/lane_c_eval_sandboxed.yaml` instead: 28 cells, the 14-case
 suite x {claude anchor under local Claude Code auth, `gemma4:26b-mlx` via
 OpenCode/Ollama}, each with `omd_transport: http` + `sandbox: container`.
 Its header lists the extra prerequisites (colima up, sandbox images built,
