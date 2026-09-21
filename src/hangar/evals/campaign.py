@@ -236,13 +236,15 @@ def _estimate_seconds(config: RunConfig, results_dir: Path) -> float | None:
     return None
 
 
-def print_plan(name: str, rows: list[dict]) -> None:
-    todo = [r for r in rows if r["status"].should_run]
+def print_plan(name: str, rows: list[dict], *, force: bool = False) -> None:
+    """``force`` mirrors ``run_campaign``: graded cells run again, fresh."""
+    todo = [r for r in rows if force or r["status"].should_run]
     print(f"\n== plan for '{name}': {len(rows)} case(s), "
-          f"{len(todo)} to run, {len(rows) - len(todo)} already graded")
+          f"{len(todo)} to run, {len(rows) - len(todo)} already graded"
+          + (" (--force: graded cells re-run)" if force else ""))
     for row in rows:
         status = row["status"]
-        mark = {"graded": "skip  ", "resumable": "RESUME",
+        mark = {"graded": "FORCE " if force else "skip  ", "resumable": "RESUME",
                 "not_started": "run   "}[status.state]
         est = f"~{_hms(row['estimate_s'])}" if row["estimate_s"] else "~?"
         print(f"   {mark} {row['config'].case:<22s} {row['config'].seeds} seeds  "
@@ -364,7 +366,7 @@ def run_campaign(name: str, *, only: set[str] | None = None, force: bool = False
                 continue
             _run_hangar_step(step, hangar_repo)
 
-        print_plan(name, plan_rows(cells, results_dir))
+        print_plan(name, plan_rows(cells, results_dir), force=force)
         print()
 
         total = len(cells)
@@ -635,7 +637,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"   preflight  {result}")
         for step in composite.get("hangar_steps", []):
             print(f"   would run  [hangar] {step}: {HANGAR_STEPS[step][1]}")
-        print_plan(args.campaign, plan_rows(cells, results_dir))
+        print_plan(args.campaign, plan_rows(cells, results_dir), force=args.force)
         print("\n   dry run — nothing was executed.")
         return 0
 

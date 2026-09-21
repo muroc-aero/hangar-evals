@@ -351,3 +351,27 @@ def test_opencode_live_smoke(tmp_path):
     assert not builtins_used, f"built-in tools leaked: {builtins_used}"
     # Raw events were persisted for debugging.
     assert (tmp_path / "opencode_events.jsonl").exists()
+
+
+def test_a_tool_that_raised_is_a_failed_call_not_a_valid_one():
+    """Seen on the 2026-09-21 gemma arm: run_plan given a plan DIRECTORY raises
+    inside omd; FastMCP renders the exception as plain text with no error
+    envelope and OpenCode still marks the call "completed". That is not a
+    valid call -- it must count against Valid%, coded TOOL_EXCEPTION."""
+    stream = "\n".join([
+        json.dumps({"type": "tool_use", "part": {
+            "type": "tool", "tool": "omd_run_plan", "callID": "c1",
+            "state": {"status": "completed", "input": {"plan_path": "plans/x"},
+                      "output": "Error executing tool run_plan: [Errno 21] "
+                                "Is a directory: '/data/plans/x'"}}}),
+        json.dumps({"type": "tool_use", "part": {
+            "type": "tool", "tool": "omd_run_plan", "callID": "c2",
+            "state": {"status": "completed", "input": {"plan_path": "plans/x/plan.yaml"},
+                      "output": '{"run_id": "run-1", "results": {}}'}}}),
+        json.dumps({"type": "step_finish", "part": {"cost": 0}}),
+    ])
+    run = parse_opencode_events(stream, server="omd")
+    raised, fine = run.tool_calls
+    assert raised.tool == "run_plan" and not raised.ok
+    assert raised.error_code == "TOOL_EXCEPTION"
+    assert fine.ok and fine.error_code is None

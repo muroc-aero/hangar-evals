@@ -73,7 +73,7 @@ a five-hour bundle needs one unlock and no further prompts. The local arms need
 no credential and no `op`:
 
 ```bash
-scripts/evals run gemma            # on-device, ~14 h, free
+scripts/evals run gemma            # on-device, ~8.5 h, free
 scripts/evals run paper            # lanes + agent column + every arm
 scripts/evals run anchor --dry-run # preflight and plan; no agent calls, no spend
 scripts/evals run anchor --only paraboloid,pyc_turbojet

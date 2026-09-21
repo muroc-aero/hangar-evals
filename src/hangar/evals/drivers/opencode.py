@@ -79,6 +79,12 @@ def _accumulate_tokens(acc: dict, tokens) -> None:
             acc[key] = acc.get(key, 0) + val
 
 
+# FastMCP's rendering of an unhandled exception inside a tool: plain text, no
+# envelope, and OpenCode marks the call "completed" anyway.
+TOOL_EXCEPTION_PREFIX = "Error executing tool "
+TOOL_EXCEPTION_CODE = "TOOL_EXCEPTION"
+
+
 def parse_opencode_events(stdout: str, server: str) -> OpenCodeRun:
     """Parse OpenCode's ``--format json`` JSONL into report + trace + telemetry.
 
@@ -86,7 +92,9 @@ def parse_opencode_events(stdout: str, server: str) -> OpenCodeRun:
     ``state.status == "completed"`` AND its output is not an omd error
     envelope — omd returns ``USER_INPUT_ERROR`` envelopes as normal tool
     OUTPUT (status still "completed"), so the envelope, not the status, is the
-    source of truth for schema rejections.
+    source of truth for schema rejections. A tool that raised (FastMCP renders
+    it as ``Error executing tool <name>: ...``, no envelope) is a failed call
+    too, coded ``TOOL_EXCEPTION``.
     """
     text_parts: list[str] = []
     calls: list[ToolCall] = []
@@ -112,6 +120,11 @@ def parse_opencode_events(stdout: str, server: str) -> OpenCodeRun:
             if output is not None and not isinstance(output, str):
                 output = json.dumps(output)
             code = parse_omd_error_code(output)
+            if code is None and isinstance(output, str) and output.startswith(TOOL_EXCEPTION_PREFIX):
+                # The MCP layer's text for a tool that RAISED instead of returning
+                # an envelope (e.g. run_plan on a directory: "[Errno 21] Is a
+                # directory"). OpenCode still reports status "completed".
+                code = TOOL_EXCEPTION_CODE
             ok = state.get("status") == "completed" and code is None
             calls.append(ToolCall(tool=tool, ok=ok, error_code=code or (None if ok else "ERROR")))
         elif etype == "step_finish":
