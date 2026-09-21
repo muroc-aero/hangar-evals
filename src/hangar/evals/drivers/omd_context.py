@@ -44,8 +44,14 @@ files in this directory instead; read them with your `read` tool:
 
 def omd_texts() -> tuple[str, str, str]:
     """``(instructions, reference, plan_schema)`` straight from ``hangar.omd``."""
-    from hangar.omd.instructions import INSTRUCTIONS
     from hangar.omd.tools.resources import plan_schema_resource, reference_guide
+
+    try:
+        from hangar.omd.instructions import INSTRUCTIONS  # the-hangar #116+
+    except ImportError:  # older omd: the text lives only on the built server
+        from hangar.omd.server import mcp
+
+        INSTRUCTIONS = mcp.instructions
 
     async def _both() -> tuple[str, str]:
         return await reference_guide(), await plan_schema_resource()
