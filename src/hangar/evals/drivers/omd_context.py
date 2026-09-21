@@ -10,7 +10,7 @@ OpenCode 1.17.5 forwards neither. It never calls the client's
 ``getInstructions()``, and resources exist only for the TUI's ``@`` picker
 (a person attaches one; ``opencode run`` cannot). So a local model sees omd's
 tools and nothing else, and guesses component types. Verified in the binary
-on 2026-09-21; see hangar-evals PR #27.
+on 2026-09-21; see hangar-evals PR #28.
 
 This module delivers the same three texts the way OpenCode CAN receive them:
 ``AGENTS.md`` in the project dir goes into its system prompt, and the two
