@@ -107,6 +107,21 @@ What the runner guarantees:
 Each run leaves `table.md`, `manifest.json` (what ran, at which SHA, with what
 outcome), and `campaign.log` under `results/campaigns/<arm>_<stamp>/`.
 
+## What each harness shows the model
+
+The anchor (Claude Code) receives omd's MCP `instructions` in its system
+prompt and can list and read the server's resources; its first calls on
+every case read `omd://reference` and `omd://plan-schema`. OpenCode 1.17.5
+forwards neither (verified in the binary, 2026-09-21): the model sees omd's
+tools and nothing else. So the OpenCode driver writes, before every run,
+an `AGENTS.md` carrying the same instructions (OpenCode loads it into the
+system prompt) and the two resources as `omd_reference.md` and
+`omd_plan_schema.json` for its `read` tool -- inlined into `AGENTS.md` on the
+unsandboxed track, which has no `read`. The texts are imported from
+`hangar.omd` at run time (`drivers/omd_context.py`), never copied. Arms
+before 2026-09-21 ran without this; the gemma arm of that date is the last
+one that did.
+
 ## When a seed exits nonzero
 
 A nonzero `telemetry.exit_code` is reported by the harness-health banner and

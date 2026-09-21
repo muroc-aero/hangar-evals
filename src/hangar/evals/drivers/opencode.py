@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from hangar.evals.drivers.base import AgentResult, MCPServerSpec
+from hangar.evals.drivers.omd_context import omd_agent_context
 from hangar.evals.drivers.proc import run_process
 from hangar.evals.drivers.sandbox import CONTAINER_WORKSPACE, ContainerSandbox
 from hangar.evals.trace import ToolCall, parse_omd_error_code
@@ -253,6 +254,12 @@ class OpenCodeDriver:
             mcp, model, self.provider, self.base_url,
             sandboxed=self.sandbox is not None)
         (data_root / "opencode.json").write_text(json.dumps(config, indent=2))
+        # omd's instructions + resources, which OpenCode would otherwise never
+        # show the model (see omd_context). Written before launch; the agent
+        # then starts from the same texts the anchor reads over MCP.
+        for name, text in omd_agent_context(
+                files_readable=self.sandbox is not None).items():
+            (data_root / name).write_text(text)
 
         container = f"hangar_{data_root.name}" if self.sandbox else None
         argv = self.build_argv(prompt, data_root, model, container=container)

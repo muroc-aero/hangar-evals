@@ -265,6 +265,35 @@ def test_run_writes_config_parses_events_and_passes_budgets(monkeypatch, tmp_pat
     # Raw events persisted for debuggability.
     assert (tmp_path / "opencode_events.jsonl").read_text() == SPIKE_JSONL
 
+    # omd's instructions reach the model through AGENTS.md (OpenCode forwards
+    # neither MCP instructions nor resources). Unsandboxed there is no `read`
+    # tool, so the two resources are inlined.
+    agents = (tmp_path / "AGENTS.md").read_text()
+    assert "MDAO analysis plan server" in agents          # the instructions
+    assert "## omd://reference" in agents                  # inlined resource
+    assert "oas/AeroPoint" in agents                       # ...with real types
+    assert (tmp_path / "omd_reference.md").read_text().startswith("# omd MCP Server")
+    assert json.loads((tmp_path / "omd_plan_schema.json").read_text())
+
+
+def test_sandboxed_run_points_agents_md_at_the_resource_files(monkeypatch, tmp_path):
+    from hangar.evals.drivers.sandbox import ContainerSandbox
+    seen: dict = {}
+
+    def fake_run_process(argv, timeout_s=None, cwd=None):
+        # The files must exist BEFORE opencode starts (it reads AGENTS.md at boot).
+        seen["agents_at_launch"] = (tmp_path / "AGENTS.md").read_text()
+        return ProcOutcome(0, SPIKE_JSONL, "", timed_out=False)
+
+    monkeypatch.setattr(opencode_mod, "run_process", fake_run_process)
+    spec = MCPServerSpec.omd_http("http://127.0.0.1:1/mcp")
+    OpenCodeDriver(sandbox=ContainerSandbox(image="img")).run("x", spec, tmp_path)
+    agents = seen["agents_at_launch"]
+    assert "MDAO analysis plan server" in agents
+    assert "./omd_reference.md" in agents and "./omd_plan_schema.json" in agents
+    assert "## omd://reference" not in agents               # pointed to, not inlined
+    assert "oas/AeroPoint" in (tmp_path / "omd_reference.md").read_text()
+
 
 def test_run_nonzero_exit_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(
