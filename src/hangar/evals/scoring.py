@@ -33,6 +33,11 @@ class Metric:
     report_required: bool | None = None
     # Key in the run's `run_cases` final data (effect oracle); None -> lane_a_key.
     effect_key: str | None = None
+    # omd run mode this metric grades ("analysis" | "optimize"); None -> the
+    # oracle's MODE_BY_MODULE table keyed on lane_a_module. Set explicitly when
+    # a module name is shared across families with different modes (evt's
+    # `sizing` is an analysis run; Aviary's `sizing` is an optimize run).
+    mode: str | None = None
 
 
 @dataclass(frozen=True)

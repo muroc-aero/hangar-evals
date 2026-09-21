@@ -258,13 +258,13 @@ def test_ambiguous_suffix_grades_none_not_a_guess():
     assert effect_values(metrics, runs)["wing_CL"] is None
 
 
-def test_every_case_module_has_a_mode_mapping():
-    # A module missing from MODE_BY_MODULE is a KeyError at grading time —
-    # keep the table total over the case suite.
-    from hangar.evals.oracle import MODE_BY_MODULE
+def test_every_case_metric_has_a_mode():
+    # A module missing from MODE_BY_MODULE (with no per-metric mode) is a
+    # KeyError at grading time — keep the mapping total over the case suite.
+    from hangar.evals.oracle import mode_for
     for case in CASES.values():
         for m in case.metrics:
-            assert m.lane_a_module in MODE_BY_MODULE, (case.name, m.lane_a_module)
+            assert mode_for(m) in ("analysis", "optimize"), (case.name, m.key)
 
 
 def test_assess_values_extraction_flattens_components_and_skips_bookkeeping():

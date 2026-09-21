@@ -88,6 +88,14 @@ MODE_BY_MODULE = {
     "sizing": "analysis",
 }
 
+
+
+def mode_for(metric: Metric) -> str:
+    """The omd run mode a metric grades: its own ``mode`` when set, else the
+    module table. A module in neither is a KeyError at grading time."""
+    return metric.mode or MODE_BY_MODULE[metric.lane_a_module]
+
+
 # Assessment metadata keys that are run bookkeeping, not summary metrics.
 _ASSESS_BOOKKEEPING = {"status", "mode", "case_count"}
 
@@ -234,7 +242,7 @@ def selection_basis(
     without naming a run we could grade, so the policy guessed — which is
     exactly the situation that cost the 2026-09-11 arm four seeds.
     """
-    modes = {MODE_BY_MODULE[m.lane_a_module] for m in metrics}
+    modes = {mode_for(m) for m in metrics}
     chosen = [select_run(runs, mode, reported_run_id) for mode in sorted(modes)]
     if not any(chosen):
         return NOTHING
@@ -262,7 +270,7 @@ def effect_values(
     """
     out: dict[str, float | None] = {}
     for m in metrics:
-        run = select_run(runs, MODE_BY_MODULE[m.lane_a_module], reported_run_id)
+        run = select_run(runs, mode_for(m), reported_run_id)
         got = _lookup(run, m.effect_key or m.lane_a_key) if run else None
         out[m.key] = float(got) if _is_scalar(got) else None
     return out
@@ -289,7 +297,7 @@ def oracle_ambiguity(metrics: list[Metric], runs: list[EffectRun]) -> int:
     read it alongside ``selection_basis``, which says whether the agent named
     its answer or the policy had to guess.
     """
-    modes = {MODE_BY_MODULE[m.lane_a_module] for m in metrics}
+    modes = {mode_for(m) for m in metrics}
     skipped = 0
     for mode in modes:
         n = sum(1 for r in runs if r.executed_ok and r.mode == mode)

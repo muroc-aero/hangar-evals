@@ -106,6 +106,12 @@ def _ocp_metrics(module: str) -> list[Metric]:
     ]
 
 
+def _avy_metrics(module: str, keys: list[str]) -> list[Metric]:
+    """Aviary sizing metrics: same key in the report, Lane A dict, and the
+    omd summary; graded against the optimize run (see the cases below)."""
+    return [Metric(k, module, k, rtol=1e-3, mode="optimize") for k in keys]
+
+
 # The Lane-C suite (Step 15). T0 = paraboloid (hinted prompt, the smoke/floor
 # task); everything else is T1/T4 on the example's *_open.prompt.md — the open
 # prompts state the engineering goal and physical inputs but name no factory,
@@ -233,5 +239,33 @@ CASES: dict[str, Case] = {
                    "total_mission_energy_kw_hr", rtol=1e-3),
             Metric("peak_power_kw", "sizing", "peak_power_kw", rtol=1e-3),
         ],
+    ),
+    # Aviary sizing (native avy/Sizing in omd, 2026-09-19). Every Aviary run
+    # is an OPTIMIZE run -- the component brings its own DVs and objective --
+    # so the metrics carry mode="optimize" explicitly (evt's `sizing` module
+    # shares the name and is an analysis run). Lane A/B/C agree to 1e-6; the
+    # 1e-3 grading tolerance leaves room for an agent's own optimizer
+    # settings while a wrong deck, mission, or unconverged run still misses.
+    "avy_single_aisle": Case(
+        name="avy_single_aisle",
+        example="avy_single_aisle",
+        prompt_file="sizing_open.prompt.md",
+        metrics=_avy_metrics("sizing", ["gross_mass_lbm", "total_fuel_mass_lbm",
+                                        "range_nmi", "final_time_min"]),
+    ),
+    # Three-tool coupled sizing (Aviary + OAS wingbox + pyCycle HBTF deck),
+    # the demo that replaced ocp_three_tool on 2026-09-20. A run_plan is
+    # ~2 min plus a ~4 min pyCycle sweep when the deck is not cached (the
+    # host omd service shares the-hangar's deck cache -- MCPServerSpec.omd),
+    # so it gets the long budget. engine_scale_factor is a top-level summary
+    # scalar omd snapshots into the assessment.
+    "avy_three_tool": Case(
+        name="avy_three_tool",
+        example="avy_three_tool",
+        prompt_file="coupled_sizing_open.prompt.md",
+        metrics=_avy_metrics("coupled_sizing", [
+            "gross_mass_lbm", "total_fuel_mass_lbm", "wing_mass_lbm",
+            "range_nmi", "final_time_min", "engine_scale_factor"]),
+        timeout_s=2700.0,
     ),
 }

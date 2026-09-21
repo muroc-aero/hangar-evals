@@ -1,7 +1,8 @@
 # Lane C agent evals — PUBLICATION run, claude anchor (Opus) — 3 seeds.
-# 11-case suite x 3 seeds/cell, sandboxed (container + http).
-# ocp_three_tool is DROPPED (needs reconfiguring to run under a uniform cap);
-# every remaining case is capped at 1100s (~18 min).
+# 13-case suite x 3 seeds/cell, sandboxed (container + http).
+# ocp_three_tool is DROPPED (deactivated in the-hangar on 2026-09-20; the
+# three-tool case is avy_three_tool: Aviary + OAS + pyCycle, 2700 s cap).
+# Every other case is capped at 1100s (~18 min).
 #
 # ARMS ARE SEPARATE STUDY FILES so you can run them independently — the Opus
 # anchor draws Max-plan usage and wants a deliberate window; the local arms are
@@ -69,3 +70,7 @@ cases:
     overrides: {case: pyc_turbojet, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
   - case_id: evt_native_sizing_claude
     overrides: {case: evt_native_sizing, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
+  - case_id: avy_single_aisle_claude
+    overrides: {case: avy_single_aisle, harness: claude, seeds: 3, timeout_s: 1100, omd_transport: http, sandbox: container}
+  - case_id: avy_three_tool_claude
+    overrides: {case: avy_three_tool, harness: claude, seeds: 3, timeout_s: 2700, omd_transport: http, sandbox: container}

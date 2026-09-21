@@ -1,5 +1,5 @@
 # Lane C agent evals as a have-agent study — SANDBOXED, both arms:
-# the full 12-case suite x {claude anchor, gemma local}, 1 seed per cell,
+# the full 14-case suite x {claude anchor, gemma local}, 1 seed per cell,
 # every agent in a colima/docker container with only a scratch workspace
 # mounted and omd reached over http (container sandbox REQUIRES http).
 #
@@ -64,6 +64,10 @@ cases:
     overrides: {case: ocp_three_tool, harness: claude, seeds: 1, omd_transport: http, sandbox: container}
   - case_id: evt_native_sizing_claude
     overrides: {case: evt_native_sizing, harness: claude, seeds: 1, omd_transport: http, sandbox: container}
+  - case_id: avy_single_aisle_claude
+    overrides: {case: avy_single_aisle, harness: claude, seeds: 1, omd_transport: http, sandbox: container}
+  - case_id: avy_three_tool_claude
+    overrides: {case: avy_three_tool, harness: claude, seeds: 1, omd_transport: http, sandbox: container}
 
   # --- gemma local arm (OpenCode -> Ollama, docker-wrapped, no env passthrough) ---
   - case_id: paraboloid_gemma
@@ -90,3 +94,7 @@ cases:
     overrides: {case: ocp_three_tool, harness: opencode, model: "gemma4:26b-mlx", seeds: 1, omd_transport: http, sandbox: container}
   - case_id: evt_native_sizing_gemma
     overrides: {case: evt_native_sizing, harness: opencode, model: "gemma4:26b-mlx", seeds: 1, omd_transport: http, sandbox: container}
+  - case_id: avy_single_aisle_gemma
+    overrides: {case: avy_single_aisle, harness: opencode, model: "gemma4:26b-mlx", seeds: 1, omd_transport: http, sandbox: container}
+  - case_id: avy_three_tool_gemma
+    overrides: {case: avy_three_tool, harness: opencode, model: "gemma4:26b-mlx", seeds: 1, omd_transport: http, sandbox: container}

@@ -15,11 +15,11 @@ EXPECTED_CASES = {
     "paraboloid", "oas_aero_rect", "oas_aerostruct_rect", "ocp_caravan_basic",
     "ocp_caravan_full", "ocp_hybrid_twin", "oas_ocp_combined",
     "ocp_oas_coupled", "ocp_oas_direct", "pyc_turbojet", "ocp_three_tool",
-    "evt_native_sizing",
+    "evt_native_sizing", "avy_single_aisle", "avy_three_tool",
 }
 
 
-def test_suite_is_exactly_the_twelve_cases():
+def test_suite_is_exactly_the_fourteen_cases():
     assert set(CASES) == EXPECTED_CASES
     # ocp_pyc_coupled must stay out: its materializer path cannot match
     # Lane A through the tool surface (weight-slot OEW passthrough).
@@ -53,9 +53,20 @@ def test_metric_keys_unique_within_each_case():
 
 def test_per_case_budgets():
     # Step 18: every case carries its own turn + wall-clock budgets. The suite
-    # default is 15 min; ocp_three_tool legitimately runs long (OAS + OCP +
-    # pyCycle per run_plan) and gets 45.
+    # default is 18 min; the three-tool cases legitimately run long (three
+    # solver stacks per run_plan) and get 45.
     for case in CASES.values():
         assert case.max_turns == 100, case.name
-        expected = 2700.0 if case.name == "ocp_three_tool" else 1100.0
+        three_tool = case.name in ("ocp_three_tool", "avy_three_tool")
+        expected = 2700.0 if three_tool else 1100.0
         assert case.timeout_s == expected, case.name
+
+
+def test_aviary_metrics_grade_the_optimize_run():
+    # Every Aviary run is an optimize run; evt's `sizing` module (an analysis
+    # run) shares the module name, so the mode must be pinned per metric.
+    from hangar.evals.oracle import mode_for
+    for name in ("avy_single_aisle", "avy_three_tool"):
+        for m in CASES[name].metrics:
+            assert mode_for(m) == "optimize", (name, m.key)
+    assert mode_for(CASES["evt_native_sizing"].metrics[0]) == "analysis"
