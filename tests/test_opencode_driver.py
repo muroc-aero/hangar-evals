@@ -265,6 +265,35 @@ def test_run_writes_config_parses_events_and_passes_budgets(monkeypatch, tmp_pat
     # Raw events persisted for debuggability.
     assert (tmp_path / "opencode_events.jsonl").read_text() == SPIKE_JSONL
 
+    # omd's instructions reach the model through AGENTS.md (OpenCode forwards
+    # neither MCP instructions nor resources). Unsandboxed there is no `read`
+    # tool, so the two resources are inlined.
+    agents = (tmp_path / "AGENTS.md").read_text()
+    assert "MDAO analysis plan server" in agents          # the instructions
+    assert "## omd://reference" in agents                  # inlined resource
+    assert "oas/AeroPoint" in agents                       # ...with real types
+    assert (tmp_path / "omd_reference.md").read_text().startswith("# omd MCP Server")
+    assert json.loads((tmp_path / "omd_plan_schema.json").read_text())
+
+
+def test_sandboxed_run_points_agents_md_at_the_resource_files(monkeypatch, tmp_path):
+    from hangar.evals.drivers.sandbox import ContainerSandbox
+    seen: dict = {}
+
+    def fake_run_process(argv, timeout_s=None, cwd=None):
+        # The files must exist BEFORE opencode starts (it reads AGENTS.md at boot).
+        seen["agents_at_launch"] = (tmp_path / "AGENTS.md").read_text()
+        return ProcOutcome(0, SPIKE_JSONL, "", timed_out=False)
+
+    monkeypatch.setattr(opencode_mod, "run_process", fake_run_process)
+    spec = MCPServerSpec.omd_http("http://127.0.0.1:1/mcp")
+    OpenCodeDriver(sandbox=ContainerSandbox(image="img")).run("x", spec, tmp_path)
+    agents = seen["agents_at_launch"]
+    assert "MDAO analysis plan server" in agents
+    assert "./omd_reference.md" in agents and "./omd_plan_schema.json" in agents
+    assert "## omd://reference" not in agents               # pointed to, not inlined
+    assert "oas/AeroPoint" in (tmp_path / "omd_reference.md").read_text()
+
 
 def test_run_nonzero_exit_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(
@@ -351,3 +380,27 @@ def test_opencode_live_smoke(tmp_path):
     assert not builtins_used, f"built-in tools leaked: {builtins_used}"
     # Raw events were persisted for debugging.
     assert (tmp_path / "opencode_events.jsonl").exists()
+
+
+def test_a_tool_that_raised_is_a_failed_call_not_a_valid_one():
+    """Seen on the 2026-09-21 gemma arm: run_plan given a plan DIRECTORY raises
+    inside omd; FastMCP renders the exception as plain text with no error
+    envelope and OpenCode still marks the call "completed". That is not a
+    valid call -- it must count against Valid%, coded TOOL_EXCEPTION."""
+    stream = "\n".join([
+        json.dumps({"type": "tool_use", "part": {
+            "type": "tool", "tool": "omd_run_plan", "callID": "c1",
+            "state": {"status": "completed", "input": {"plan_path": "plans/x"},
+                      "output": "Error executing tool run_plan: [Errno 21] "
+                                "Is a directory: '/data/plans/x'"}}}),
+        json.dumps({"type": "tool_use", "part": {
+            "type": "tool", "tool": "omd_run_plan", "callID": "c2",
+            "state": {"status": "completed", "input": {"plan_path": "plans/x/plan.yaml"},
+                      "output": '{"run_id": "run-1", "results": {}}'}}}),
+        json.dumps({"type": "step_finish", "part": {"cost": 0}}),
+    ])
+    run = parse_opencode_events(stream, server="omd")
+    raised, fine = run.tool_calls
+    assert raised.tool == "run_plan" and not raised.ok
+    assert raised.error_code == "TOOL_EXCEPTION"
+    assert fine.ok and fine.error_code is None

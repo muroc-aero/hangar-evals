@@ -20,6 +20,7 @@ from hangar.evals.campaign import (
     load_manifest,
     manifest_path,
     plan_rows,
+    print_plan,
 )
 from hangar.evals.run import RunConfig
 
@@ -118,6 +119,22 @@ def test_plan_reports_a_status_per_cell_without_running_anything(tmp_path):
     [row] = plan_rows(cells, tmp_path)
     assert row["status"].state == "not_started"
     assert row["estimate_s"] is None       # no prior data to estimate from
+
+
+def test_the_plan_shows_force_as_a_re_run_not_a_skip(tmp_path, capsys):
+    """Seen 2026-09-21: `run gemma --force --dry-run` printed all 11 graded
+    cells as `skip` and "2 to run" while the run loop re-ran all 13."""
+    from hangar.evals.results_index import CaseStatus
+    _, cells = load_manifest(_manifest(tmp_path, [_case("paraboloid")]), tmp_path)
+    rows = plan_rows(cells, tmp_path)
+    rows[0]["status"] = CaseStatus(state="graded", records=tmp_path / "x.jsonl",
+                                   n_seeds_found=5, n_seeds_wanted=5,
+                                   n_error_seeds=0, n_passed=5, reason="5/5 passed")
+    print_plan("gemma", rows)
+    assert "1 case(s), 0 to run, 1 already graded" in capsys.readouterr().out
+    print_plan("gemma", rows, force=True)
+    out = capsys.readouterr().out
+    assert "1 to run" in out and "FORCE " in out and "skip" not in out
 
 
 def test_the_estimate_uses_the_newest_prior_run_of_the_case(tmp_path):
