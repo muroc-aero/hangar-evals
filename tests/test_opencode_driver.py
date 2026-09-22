@@ -295,6 +295,52 @@ def test_sandboxed_run_points_agents_md_at_the_resource_files(monkeypatch, tmp_p
     assert "oas/AeroPoint" in (tmp_path / "omd_reference.md").read_text()
 
 
+def test_run_unloads_the_model_after_the_seed(monkeypatch, tmp_path):
+    """Ollama's MLX runner leaks ~0.5 GiB per request (2026-09-22); the driver
+    drops the runner after every seed unless told not to."""
+    monkeypatch.setattr(opencode_mod, "run_process",
+                        lambda *a, **k: ProcOutcome(0, SPIKE_JSONL, "", timed_out=False))
+    unloaded = []
+    monkeypatch.setattr(opencode_mod, "unload_model",
+                        lambda base_url, model: unloaded.append((base_url, model)))
+    spec = MCPServerSpec.omd(tmp_path)
+    OpenCodeDriver(base_url="http://h:11434/v1").run("x", spec, tmp_path, model="m1")
+    assert unloaded == [("http://h:11434/v1", "m1")]
+    OpenCodeDriver(unload_after_run=False).run("x", spec, tmp_path, model="m1")
+    assert len(unloaded) == 1
+
+
+def test_unload_model_posts_keep_alive_zero_to_the_native_api(monkeypatch):
+    import urllib.request
+    seen = {}
+
+    class _Resp:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def read(self): return b"{}"
+
+    def fake_urlopen(req, timeout=None):
+        seen["url"] = req.full_url
+        seen["body"] = json.loads(req.data)
+        return _Resp()
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    assert opencode_mod.unload_model("http://localhost:11434/v1", "qwen3.6:35b-mlx") is True
+    assert seen == {"url": "http://localhost:11434/api/generate",
+                    "body": {"model": "qwen3.6:35b-mlx", "keep_alive": 0}}
+
+
+def test_unload_model_failure_is_reported_not_raised(monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    def boom(req, timeout=None):
+        raise urllib.error.URLError("down")
+
+    monkeypatch.setattr(urllib.request, "urlopen", boom)
+    assert opencode_mod.unload_model("http://localhost:11434/v1", "m") is False
+
+
 def test_run_nonzero_exit_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(
         opencode_mod, "run_process",

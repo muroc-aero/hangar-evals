@@ -122,6 +122,20 @@ unsandboxed track, which has no `read`. The texts are imported from
 before 2026-09-21 ran without this; the gemma arm of that date is the last
 one that did.
 
+## Ollama on the local arms
+
+Ollama 0.30's MLX runner grows by about 0.5 GiB per request and never
+shrinks: on 2026-09-22 `qwen3.6:35b-mlx` went from 21 GiB at load to 47 GiB
+34 minutes later with no prompt above 33k tokens, the host swapped 20 GB,
+and every seed after that ended in one turn with no tool call (the model's
+opening sentence, then `stop`). Those look like graded FAILs but are an
+infrastructure fault. The OpenCode driver therefore unloads the model after
+every seed (`unload_model`, `keep_alive: 0`, a few seconds to reload), and
+`unload_after_run=False` turns that off. If a local arm's seeds start
+finishing in one turn, check `sysctl vm.swapusage` and Ollama's
+`peak memory` log lines (`/opt/homebrew/var/log/ollama.log`) before
+reading anything into the numbers.
+
 ## When a seed exits nonzero
 
 A nonzero `telemetry.exit_code` is reported by the harness-health banner and
