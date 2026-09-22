@@ -272,11 +272,17 @@ def _run_hangar_step(step: str, hangar_repo: Path) -> bool:
     return proc.returncode == 0
 
 
-def _run_one_case(config: RunConfig, results_dir: Path) -> tuple[str, list[dict]]:
-    """Run (or resume) one cell. Returns ``(state, regraded summaries)``."""
+def _run_one_case(config: RunConfig, results_dir: Path, *,
+                  force: bool = False) -> tuple[str, list[dict]]:
+    """Run (or resume) one cell. Returns ``(state, regraded summaries)``.
+
+    ``force`` starts fresh even when a partial record exists: a forced arm is
+    a new measurement, and resuming would stitch this run's seeds onto ones
+    from months ago (the qwen paraboloid cell, 3 seeds from 2026-06).
+    """
     status = case_status(config, results_dir)
     resume_records = None
-    if status.is_resume:
+    if status.is_resume and not force:
         manifest = status.records.with_name(status.records.stem + "_config.json")
         if manifest.is_file():
             stamp = json.loads(manifest.read_text())["stamp"]
@@ -403,7 +409,7 @@ def run_campaign(name: str, *, only: set[str] | None = None, force: bool = False
                      "started": datetime.now(timezone.utc).isoformat(
                          timespec="seconds")}
             try:
-                state, cell_summaries = _run_one_case(config, results_dir)
+                state, cell_summaries = _run_one_case(config, results_dir, force=force)
             except KeyboardInterrupt:
                 entry.update(status="interrupted", elapsed_s=time.time() - t0)
                 entries.append(entry)
