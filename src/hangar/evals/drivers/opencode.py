@@ -30,6 +30,7 @@ Two operational notes learned from the spike:
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import time
 from dataclasses import dataclass
@@ -154,6 +155,38 @@ BUILTIN_TOOLS = [
 CONTAMINATION_BUILTINS = ["webfetch", "websearch"]
 
 
+def unload_model(base_url: str, model: str, timeout_s: float = 60.0) -> bool:
+    """Ask Ollama to drop ``model``'s runner now (``keep_alive: 0``).
+
+    Ollama 0.30's MLX runner grows by ~0.5 GiB per request and never shrinks
+    (qwen3.6:35b-mlx: 21 GiB at load, 47 GiB 34 min later with prompts under
+    33k tokens; the host swapped 20 GB and seeds degraded to one-turn
+    stops -- 2026-09-22). Unloading stops the runner subprocess, which is
+    the only thing that frees it. A reload costs a few seconds per seed.
+    ``base_url`` is the OpenAI-compatible endpoint (``.../v1``); the native
+    API sits beside it. Returns False (and logs) rather than raising: a
+    failed unload must not lose a finished seed.
+    """
+    import urllib.error
+    import urllib.request
+
+    native = base_url.rstrip("/")
+    if native.endswith("/v1"):
+        native = native[: -len("/v1")]
+    req = urllib.request.Request(
+        native + "/api/generate",
+        data=json.dumps({"model": model, "keep_alive": 0}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            resp.read()
+        return True
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        logging.getLogger(__name__).warning("unload of %s failed: %s", model, exc)
+        return False
+
+
 def _containerize_url(url: str) -> str:
     """Rewrite a host-loopback URL for in-container use.
 
@@ -232,11 +265,13 @@ class OpenCodeDriver:
         provider: str = "ollama",
         binary: str = "opencode",
         sandbox: ContainerSandbox | None = None,
+        unload_after_run: bool = True,
     ):
         self.base_url = base_url
         self.provider = provider
         self.binary = binary
         self.sandbox = sandbox
+        self.unload_after_run = unload_after_run  # see unload_model
 
     def run(
         self,
@@ -278,6 +313,8 @@ class OpenCodeDriver:
         # Persist the raw event stream so every run is debuggable after the
         # fact (OpenCode itself does not retain `run`-mode transcripts).
         (data_root / "opencode_events.jsonl").write_text(proc.stdout)
+        if self.unload_after_run:
+            unload_model(self.base_url, model)
 
         if not proc.timed_out and proc.returncode != 0:
             raise RuntimeError(
