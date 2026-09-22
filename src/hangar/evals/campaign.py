@@ -244,8 +244,9 @@ def print_plan(name: str, rows: list[dict], *, force: bool = False) -> None:
           + (" (--force: graded cells re-run)" if force else ""))
     for row in rows:
         status = row["status"]
-        mark = {"graded": "FORCE " if force else "skip  ", "resumable": "RESUME",
-                "not_started": "run   "}[status.state]
+        mark = {"graded": "skip  ", "resumable": "RESUME", "not_started": "run   "}[status.state]
+        if force and status.state != "not_started":
+            mark = "FORCE "  # graded AND partial cells start fresh under --force
         est = f"~{_hms(row['estimate_s'])}" if row["estimate_s"] else "~?"
         print(f"   {mark} {row['config'].case:<22s} {row['config'].seeds} seeds  "
               f"{est:>8s}   {status.reason}")
