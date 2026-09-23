@@ -188,3 +188,43 @@ def test_opencode_container_cannot_see_either_repo_but_sees_workspace():
         assert (ws / "out.txt").read_text().strip() == "written-from-container"
     finally:
         shutil.rmtree(ws, ignore_errors=True)
+
+
+# --- container-state capture on a timed-out run (2026-09-23) -----------------
+
+
+def test_capture_container_state_copies_store_and_procs(monkeypatch, tmp_path):
+    """Before `docker kill`, the OpenCode SQLite store and the process list
+    come out of the container; both are best effort."""
+    from hangar.evals.drivers.sandbox import (
+        CONTAINER_OPENCODE_STATE, capture_container_state)
+
+    calls = []
+
+    def fake_run(argv, capture_output=True, text=True, timeout=None):
+        calls.append(argv)
+        if argv[:2] == ["docker", "cp"]:
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if argv[:2] == ["docker", "exec"]:
+            return subprocess.CompletedProcess(argv, 0, "1 opencode run\n7 sh -c find /\n", "")
+        raise AssertionError(argv)
+
+    monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
+    got = capture_container_state("hangar_pyc_s4", tmp_path)
+    assert got == {"state": True, "procs": True}
+    assert calls[0] == ["docker", "cp", f"hangar_pyc_s4:{CONTAINER_OPENCODE_STATE}",
+                        str(tmp_path / "opencode_state")]
+    assert calls[1][:3] == ["docker", "exec", "hangar_pyc_s4"]
+    assert "find /" in (tmp_path / "opencode_procs.txt").read_text()
+
+
+def test_capture_container_state_survives_a_gone_container(monkeypatch, tmp_path):
+    from hangar.evals.drivers.sandbox import capture_container_state
+
+    def fake_run(argv, capture_output=True, text=True, timeout=None):
+        return subprocess.CompletedProcess(argv, 1, "", "No such container")
+
+    monkeypatch.setattr(sandbox_mod.subprocess, "run", fake_run)
+    got = capture_container_state("hangar_gone", tmp_path)
+    assert got == {"state": False, "procs": False}
+    assert not (tmp_path / "opencode_procs.txt").exists()

@@ -17,6 +17,7 @@ and ``/tmp/colima``, and a bind-mount from anywhere else (e.g. python's default
 from __future__ import annotations
 
 import os
+import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -81,3 +82,52 @@ class ContainerSandbox:
             *inner,
         ]
         return argv
+
+
+# Where OpenCode 1.17 keeps its session store inside the image (node user):
+# an SQLite db (+ wal) holding every message part, including a tool call that
+# is still pending -- the one thing a stalled run never prints.
+CONTAINER_OPENCODE_STATE = "/home/node/.local/share/opencode"
+
+# No `ps` in the slim image; /proc is enough to see what is still running.
+_PROC_LISTING = (
+    'for p in /proc/[0-9]*; do printf "%s " "${p#/proc/}"; '
+    'tr "\\0" " " < "$p/cmdline" 2>/dev/null; echo; done'
+)
+
+
+def capture_container_state(
+    name: str, dest: Path, state_dir: str = CONTAINER_OPENCODE_STATE,
+    timeout_s: float = 60.0,
+) -> dict[str, bool]:
+    """Copy a still-running container's harness state out before it is killed.
+
+    Writes ``<dest>/opencode_state/`` (``docker cp`` of ``state_dir``) and
+    ``<dest>/opencode_procs.txt`` (pid + cmdline of every process). Three
+    qwen seeds on the 2026-09-22 arm timed out with the model idle for 11-43
+    min and the last events still in OpenCode's stdout buffer; ``--rm`` then
+    took the only record of the pending tool call with the container. Best
+    effort: a container that is already gone yields ``False`` flags, never
+    an exception -- this runs on the timeout path, where the seed's record
+    still has to be written.
+    """
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    got = {"state": False, "procs": False}
+    try:
+        cp = subprocess.run(
+            ["docker", "cp", f"{name}:{state_dir}", str(dest / "opencode_state")],
+            capture_output=True, text=True, timeout=timeout_s)
+        got["state"] = cp.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        ps = subprocess.run(
+            ["docker", "exec", name, "sh", "-c", _PROC_LISTING],
+            capture_output=True, text=True, timeout=timeout_s)
+        if ps.returncode == 0:
+            (dest / "opencode_procs.txt").write_text(ps.stdout)
+            got["procs"] = True
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return got

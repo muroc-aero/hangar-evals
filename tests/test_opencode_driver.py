@@ -378,6 +378,9 @@ def test_run_sandboxed_timeout_kills_the_container(monkeypatch, tmp_path):
     monkeypatch.setattr(
         opencode_mod.subprocess, "run",
         lambda argv, **kw: killed.append(argv) or None)
+    # the state capture that precedes the kill is covered by its own test
+    monkeypatch.setattr(opencode_mod, "capture_container_state",
+                        lambda name, dest: {})
 
     driver = OpenCodeDriver(sandbox=ContainerSandbox(
         image=OPENCODE_IMAGE, env_passthrough=()))
@@ -450,3 +453,56 @@ def test_a_tool_that_raised_is_a_failed_call_not_a_valid_one():
     assert raised.tool == "run_plan" and not raised.ok
     assert raised.error_code == "TOOL_EXCEPTION"
     assert fine.ok and fine.error_code is None
+
+
+# ---------------------------------------------------------------------------
+# A timed-out sandboxed run captures the container before killing it and
+# leaves a timeout note (2026-09-23: three qwen seeds stalled with the model
+# idle and nothing on disk named the hung tool call).
+# ---------------------------------------------------------------------------
+
+
+def test_timed_out_sandboxed_run_captures_state_before_kill(monkeypatch, tmp_path):
+    from hangar.evals.drivers.sandbox import ContainerSandbox
+
+    order: list = []
+    stalled_jsonl = SPIKE_JSONL.rstrip("\n") + "\n" + json.dumps(
+        {"type": "step_start", "timestamp": 1_700_000_000_000, "part": {}}) + "\n"
+    monkeypatch.setattr(opencode_mod, "run_process",
+                        lambda *a, **k: ProcOutcome(None, stalled_jsonl,
+                                                    "some stderr", timed_out=True))
+    monkeypatch.setattr(opencode_mod, "capture_container_state",
+                        lambda name, dest: order.append(("capture", name, dest)) or {})
+    monkeypatch.setattr(opencode_mod.subprocess, "run",
+                        lambda argv, **k: order.append(("run", argv)))
+    monkeypatch.setattr(opencode_mod, "unload_model", lambda *a, **k: True)
+
+    spec = MCPServerSpec.omd_http("http://127.0.0.1:1/mcp")
+    result = OpenCodeDriver(sandbox=ContainerSandbox(image="img")).run(
+        "x", spec, tmp_path, model="qwen3:8b", timeout_s=5.0)
+
+    assert result.timed_out is True
+    container = f"hangar_{tmp_path.name}"
+    assert order[0] == ("capture", container, tmp_path)          # before ...
+    assert order[1] == ("run", ["docker", "kill", container])     # ... the kill
+    assert (tmp_path / "opencode_stderr.txt").read_text() == "some stderr"
+    note = json.loads((tmp_path / "opencode_timeout.json").read_text())
+    assert note["timed_out"] is True
+    assert note["last_event_utc"] == "2023-11-14T22:13:20Z"
+    assert note["silent_s"] > 0
+    assert "/v1/chat/completions" in note["how_to_read"]
+
+
+def test_completed_run_writes_stderr_but_no_timeout_note(monkeypatch, tmp_path):
+    monkeypatch.setattr(opencode_mod, "run_process",
+                        lambda *a, **k: ProcOutcome(0, SPIKE_JSONL, "", timed_out=False))
+    monkeypatch.setattr(opencode_mod, "unload_model", lambda *a, **k: True)
+    OpenCodeDriver().run("x", MCPServerSpec.omd(tmp_path), tmp_path)
+    assert (tmp_path / "opencode_stderr.txt").read_text() == ""
+    assert not (tmp_path / "opencode_timeout.json").exists()
+
+
+def test_timeout_note_without_events_has_no_last_event():
+    note = opencode_mod.timeout_note("", 1100.0)
+    assert note["last_event_utc"] is None and note["silent_s"] is None
+    assert note["wall_clock_s"] == 1100.0

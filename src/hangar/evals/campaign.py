@@ -610,6 +610,19 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name, help=f"{help_text}; run nothing")
         p.add_argument("--results-dir", type=Path, default=None)
 
+    p_lost = sub.add_parser(
+        "mark-lost",
+        help="turn graded seeds into harness-loss rows so the next run retries "
+             "exactly them (a stalled sandbox, not a model result)")
+    p_lost.add_argument("case")
+    p_lost.add_argument("--seeds", required=True,
+                        help="comma-separated seed numbers")
+    p_lost.add_argument("--reason", required=True,
+                        help="why these seeds are harness losses (recorded in the row)")
+    p_lost.add_argument("--harness", default=None)
+    p_lost.add_argument("--model", default=None)
+    p_lost.add_argument("--results-dir", type=Path, default=None)
+
     args = parser.parse_args(argv)
     results_dir = Path(args.results_dir or REPO_ROOT / "results")
 
@@ -620,6 +633,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "review":
         print_review(review_rows(results_dir))
+        return 0
+
+    if args.cmd == "mark-lost":
+        from hangar.evals.mark_lost import mark_lost
+
+        seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
+        out = mark_lost(args.case, seeds, args.reason, results_dir,
+                        harness=args.harness, model=args.model)
+        for harness, model, seed in out["marked"]:
+            print(f"   marked lost  {args.case} · {harness}/{model} · seed {seed}")
+        print(f"   file         {out['file']}")
+        print("   next: the plain `scripts/evals run <arm>` resumes these seeds; "
+              "`scripts/evals table` re-renders without running.")
         return 0
 
     if args.cmd == "status":

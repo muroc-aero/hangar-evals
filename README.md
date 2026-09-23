@@ -136,6 +136,44 @@ finishing in one turn, check `sysctl vm.swapusage` and Ollama's
 `peak memory` log lines (`/opt/homebrew/var/log/ollama.log`) before
 reading anything into the numbers.
 
+## When a local seed hits the cap with the model idle
+
+A timed-out seed is graded like any other (a run that happened before the
+cap still counts), so a seed that hit the cap because a sandbox tool hung
+looks exactly like one that hit it thinking. On the 2026-09-22 qwen arm
+three seeds did the former: Ollama's log showed no `/v1/chat/completions`
+for 11, 16 and 43 minutes before the kill, omd had no pending request, and
+the last three model replies were missing from `opencode_events.jsonl`
+because OpenCode's stdout was still buffered when the process group died.
+
+The OpenCode driver now leaves three things next to the events file:
+
+- `opencode_stderr.txt` -- always.
+- `opencode_timeout.json` -- on a timeout: the last printed event's time,
+  the kill time, and the gap (`silent_s`). A long gap alone does not settle
+  it (a 32k-token reasoning step prints nothing either); compare with
+  `/opt/homebrew/var/log/ollama.log`. Requests up to the kill = the model
+  was generating. No request after `last_event_utc` = the model was idle
+  and the run was stuck in a sandbox tool call.
+- `opencode_state/` and `opencode_procs.txt` -- on a sandboxed timeout,
+  `docker cp` of the container's `~/.local/share/opencode` (the SQLite
+  session store: every message part, the pending tool call included) and
+  its process list, taken BEFORE `docker kill`.
+
+A seed the log shows to be a stall is a harness loss, not a result. Mark it
+so and the honest resume retries exactly it, nothing else:
+
+```bash
+scripts/evals mark-lost pyc_turbojet --seeds 4 \
+    --reason "sandbox stalled: Ollama idle 16 min before the cap"
+scripts/evals run qwen --only pyc_turbojet       # resumes seed 4 only
+```
+
+`mark-lost` appends a superseding error row (type `HarnessLoss`, with the
+reason and what it replaced) to the newest records file for the case; the
+original row stays in the file. Never mark a seed lost for a verdict you
+disagree with -- that is what `evals review` is for.
+
 ## When a seed exits nonzero
 
 A nonzero `telemetry.exit_code` is reported by the harness-health banner and
