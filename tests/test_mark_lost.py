@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from hangar.evals.mark_lost import ERROR_TYPE, mark_lost
+from hangar.evals.mark_lost import ERROR_TYPE, mark_lost, restore_marked
 from hangar.evals.regrade import load_records
 from hangar.evals.results_index import case_status
 from hangar.evals.run import load_resume_records
@@ -100,3 +100,39 @@ def test_cli_mark_lost(results, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "marked lost  pyc_turbojet · opencode/qwen3.6:35b-mlx · seed 4" in out
+
+
+def test_restore_marked_puts_the_original_grade_back_over_a_rerun(results):
+    mark_lost("pyc_turbojet", [4], "thought it hung", results)
+    path = results / "pyc_turbojet_20260923T015151Z.jsonl"
+    with path.open("a") as fh:                          # a resume re-ran the seed
+        fh.write(json.dumps(_record("pyc_turbojet", 4, passed=True)) + "\n")
+    assert {r["seed"]: r["passed"] for r in load_records(path)}[4] is True
+
+    out = restore_marked("pyc_turbojet", [4, 2], "it was a 32k-token step, not a hang",
+                         results)
+    assert out["restored"] == [("opencode", "qwen3.6:35b-mlx", 4)]
+    assert out["unmarked"] == [2]                       # never marked: untouched
+
+    lines = path.read_text().splitlines()
+    assert len(lines) == 8                              # 5 + mark + rerun + restore
+    row = json.loads(lines[-1])
+    assert row["passed"] is False and row["telemetry"]["timed_out"] is True
+    assert "error" not in row and "marked_lost" not in row
+    assert [s["kind"] for s in row["restored_from_lost"]["supersedes"]] == [
+        "marked_lost", "rerun"]
+    latest = {r["seed"]: r for r in load_records(path)}
+    assert latest[4]["passed"] is False and latest[4]["telemetry"]["wall_clock_s"] == 1100.0
+    assert [r["seed"] for r in load_resume_records(path)] == [0, 1, 2, 3, 4]
+    with pytest.raises(ValueError, match="reason"):
+        restore_marked("pyc_turbojet", [4], "", results)
+
+
+def test_cli_mark_lost_undo(results, capsys):
+    from hangar.evals.campaign import main
+
+    mark_lost("pyc_turbojet", [4], "stalled", results)
+    rc = main(["mark-lost", "pyc_turbojet", "--seeds", "4", "--undo",
+               "--reason", "not a hang", "--results-dir", str(results)])
+    assert rc == 0
+    assert "restored     pyc_turbojet · opencode/qwen3.6:35b-mlx · seed 4" in capsys.readouterr().out

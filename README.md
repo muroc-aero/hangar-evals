@@ -134,63 +134,68 @@ every seed (`unload_model`, `keep_alive: 0`, a few seconds to reload), and
 `unload_after_run=False` turns that off. If a local arm's seeds start
 finishing in one turn, check `sysctl vm.swapusage` and Ollama's
 `peak memory` log lines (`/opt/homebrew/var/log/ollama.log`) before
-reading anything into the numbers. The same leak has a second face: a seed
-long enough to push the runner past ~30 GiB (about 25 requests) hangs on
-its next request until the cap (next section). Until Ollama is upgraded
-past 0.30.10 or the Metal wired limit is raised (`sudo sysctl
-iogpu.wired_limit_mb=...`), expect a few percent of long seeds to be lost
-that way; `mark-lost` and the resume recover them.
+reading anything into the numbers. A long silent seed is not a second
+face of the leak: read the GPU before calling it a hang (next section). Ollama 0.34.3 (MLX 0.32.1) has been in use since 2026-09-23
+19:14 CEST; the campaign manifest records the version per arm.
 
-## When a local seed hits the cap with the model idle
+## When a local seed hits the cap in silence
 
 A timed-out seed is graded like any other (a run that happened before the
 cap still counts), so a seed that hit the cap because something hung looks
 exactly like one that hit it thinking. On the 2026-09-22 qwen arm three
-seeds hung, and a fourth did while being re-run the next morning, with the
-container's state copied out live: only `opencode run` itself was running
-(no child tool process), OpenCode had opened a new step and an empty
-reasoning part one second after the last completed model request, Ollama
-had accepted that request (a `cache hit` line, prompt processed) and never
-answered it, `ollama ps` showed the model `Stopping...`, the runner spun at
-~70% CPU, and Ollama logged `Request terminated: context canceled` the
-moment the client was killed. Every one of the four followed a `peak
-memory` line of 30.0-32.1 GiB against the 36.9 GiB Metal ceiling Ollama
-reports on this 48 GB machine: the MLX runner (0.30.10) leaks about
-0.5 GiB per request, the per-seed unload contains that across seeds, and a
-long seed still climbs into the ceiling and hangs on its next request.
-Ollama's access log lists only completed requests, so a hung one looks like
-an idle model -- read the runner lines, not the `[GIN]` lines.
+seeds (oas_ocp_combined s0, pyc_turbojet s4, avy_three_tool s0) hit the cap
+with the same signature: only `opencode run` in the container (no child
+tool process), a new step and an empty reasoning part opened one second
+after the last completed model request, no later `[GIN]` line for that
+request, `ollama ps` showing the model `Stopping...`, the runner at ~70%
+CPU, and `Request terminated: context canceled` the moment the client was
+killed. That was read as the Ollama 0.30.10 MLX runner hanging (each
+followed a `peak memory` of 30-32 GiB), the three seeds were marked lost,
+Ollama was upgraded to 0.34.3, and the resume reproduced the signature on
+the first seed at 25 GiB -- with the GPU at 95-99% -- and then ended it on
+its own after 570 s: `step_finish reason=length`, 32 000 output tokens, no
+tool call. A 32k-token step prints nothing on any side until it ends
+(`Stopping...` only means the keep-alive expired under the in-flight
+request), and at ~56 tok/s it takes ~10 min; the 0.30.10 seeds, slower
+under the leak, ran into their caps first. The marks were undone
+(`mark-lost --undo`); the three rows are the timed-out FAILs the arm
+recorded. Ollama's access log lists only completed requests, so a request
+in flight looks like an idle model -- read the runner lines, and check the
+GPU (`ioreg -r -d 1 -c IOAccelerator | grep "Device Utilization"`) before
+calling anything a hang.
 
-The OpenCode driver now leaves three things next to the events file:
+The OpenCode driver leaves three things next to the events file:
 
 - `opencode_stderr.txt` -- always.
 - `opencode_timeout.json` -- on a timeout: the last printed event's time,
-  the kill time, and the gap (`silent_s`). A long gap alone does not settle
-  it (a 32k-token reasoning step prints nothing either); compare with
-  `/opt/homebrew/var/log/ollama.log`. Completed requests up to the kill =
-  the model was generating. Last completed request minutes before the kill
-  and `Request terminated: context canceled` at the kill = a request hung
-  inside Ollama; check the last `peak memory` line.
+  the kill time, the gap (`silent_s`), and how to read them against
+  `/opt/homebrew/var/log/ollama.log`.
 - `opencode_state/` and `opencode_procs.txt` -- on a sandboxed timeout,
   `docker cp` of the container's `~/.local/share/opencode` (the SQLite
   session store: every message part, a pending tool call included) and
   its process list, taken BEFORE `docker kill`. A child process here with
-  an incomplete tool part in the store would be a hung sandbox tool; the
-  four stalls so far had neither.
+  an incomplete tool part in the store would be a hung sandbox tool; none
+  of the stalls so far had either.
 
-A seed the log shows to be a stall is a harness loss, not a result. Mark it
-so and the honest resume retries exactly it, nothing else:
+A seed the evidence shows to be a harness loss (a hung tool, a dead
+server, a rate limit) is not a result. Mark it so and the honest resume
+retries exactly it, nothing else:
 
 ```bash
 scripts/evals mark-lost pyc_turbojet --seeds 4 \
-    --reason "Ollama MLX runner hung at 30 GiB peak memory, 16 min before the cap"
+    --reason "omd server crashed at 03:52; seed ran 16 min against a dead socket"
 scripts/evals run qwen --only pyc_turbojet       # resumes seed 4 only
+scripts/evals mark-lost pyc_turbojet --seeds 4 --undo \
+    --reason "the server was up; the seed was a 32k-token step"   # if the mark was wrong
 ```
 
 `mark-lost` appends a superseding error row (type `HarnessLoss`, with the
 reason and what it replaced) to the newest records file for the case; the
-original row stays in the file. Never mark a seed lost for a verdict you
-disagree with -- that is what `evals review` is for.
+original row stays in the file. `--undo` appends the superseded row back,
+over the mark and over any re-run rows a resume added meanwhile (a re-run
+of a seed that was never a harness loss is a re-roll and does not count).
+Never mark a seed lost for a verdict you disagree with -- that is what
+`evals review` is for.
 
 ## When a seed exits nonzero
 

@@ -160,17 +160,19 @@ def timeout_note(stdout: str, wall_s: float) -> dict:
     """What a timed-out seed looked like from the harness side.
 
     ``silent_s`` is the gap between the last event OpenCode managed to print
-    and the kill. It cannot by itself separate a hung model request from a
-    model thinking for the whole cap (a 32k-token reasoning step prints
-    nothing either), so the note says what to compare it with. Ollama's
-    access log lists only COMPLETED requests: a run whose last logged
-    ``/v1/chat/completions`` predates ``last_event_utc`` by minutes is not an
-    idle model but a request still in flight -- on 2026-09-23 four such
-    stalls were the MLX runner hanging on the first request after its peak
-    memory passed ~30 GiB (``ollama ps`` shows the model ``Stopping...`` and
-    the runner spins at ~70% CPU until the client disconnects). A pending
-    sandbox tool call would instead show a child process in
-    ``opencode_procs.txt`` and an incomplete tool part in
+    and the kill. It cannot by itself separate a hung request from a model
+    thinking for the whole cap: a 32k-token step prints nothing until it
+    ends. On this stack that step is silent on every side -- OpenCode shows
+    a new step and an empty reasoning part, Ollama's access log (COMPLETED
+    requests only) shows nothing after the previous request, ``ollama ps``
+    shows the model ``Stopping...`` once the keep-alive expires under the
+    in-flight request, the runner sits at ~70% CPU -- and the one thing that
+    tells it from a hang is the GPU (``ioreg -r -d 1 -c IOAccelerator``,
+    ``Device Utilization %`` near 100). Three qwen seeds of 2026-09-22 were
+    read as Ollama hangs on that signature; the re-run on 2026-09-23 showed
+    the same signature end after 570 s as ``step_finish reason=length`` with
+    32 000 output tokens. A pending sandbox tool call would instead show a
+    child process in ``opencode_procs.txt`` and an incomplete tool part in
     ``opencode_state/opencode.db``.
     """
     last_ms = None
@@ -194,15 +196,16 @@ def timeout_note(stdout: str, wall_s: float) -> dict:
         "how_to_read": (
             "compare last_event_utc with the Ollama server log, remembering "
             "it lists only COMPLETED requests. Completed /v1/chat/completions "
-            "right up to killed_utc: the model was generating (a thinking "
-            "step that never produced a tool call). Last completed request "
-            "minutes before killed_utc and 'Request terminated: context "
-            "canceled' at the kill: a request hung inside Ollama -- check "
-            "the runner's last 'peak memory' line (the 2026-09-23 MLX hangs "
-            "all followed ~30 GiB) and `ollama ps` (model 'Stopping...'). "
-            "A child process in opencode_procs.txt with an incomplete tool "
-            "part in opencode_state/opencode.db would instead be a hung "
-            "sandbox tool."
+            "right up to killed_utc: the model was generating short steps. "
+            "Last completed request minutes before killed_utc, 'Request "
+            "terminated: context canceled' at the kill, `ollama ps` showing "
+            "'Stopping...': one request in flight the whole time, which on "
+            "this stack is a 32k-token step (silent until it ends with "
+            "reason=length) unless the GPU was idle -- check "
+            "`ioreg -r -d 1 -c IOAccelerator` for 'Device Utilization %' "
+            "while it runs. A child process in opencode_procs.txt with an "
+            "incomplete tool part in opencode_state/opencode.db would "
+            "instead be a hung sandbox tool."
         ),
     }
     if last_ms is not None:
