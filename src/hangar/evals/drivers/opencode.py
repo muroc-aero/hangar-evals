@@ -160,12 +160,18 @@ def timeout_note(stdout: str, wall_s: float) -> dict:
     """What a timed-out seed looked like from the harness side.
 
     ``silent_s`` is the gap between the last event OpenCode managed to print
-    and the kill. It cannot by itself separate a stalled sandbox tool from a
+    and the kill. It cannot by itself separate a hung model request from a
     model thinking for the whole cap (a 32k-token reasoning step prints
-    nothing either), so the note says what to compare it with: the Ollama
-    request log. No ``/v1/chat/completions`` after ``last_event_utc`` means
-    the model was idle and the run was stuck in a tool call -- look in
-    ``opencode_state/opencode.db`` for the part that never completed.
+    nothing either), so the note says what to compare it with. Ollama's
+    access log lists only COMPLETED requests: a run whose last logged
+    ``/v1/chat/completions`` predates ``last_event_utc`` by minutes is not an
+    idle model but a request still in flight -- on 2026-09-23 four such
+    stalls were the MLX runner hanging on the first request after its peak
+    memory passed ~30 GiB (``ollama ps`` shows the model ``Stopping...`` and
+    the runner spins at ~70% CPU until the client disconnects). A pending
+    sandbox tool call would instead show a child process in
+    ``opencode_procs.txt`` and an incomplete tool part in
+    ``opencode_state/opencode.db``.
     """
     last_ms = None
     for line in stdout.splitlines():
@@ -186,12 +192,17 @@ def timeout_note(stdout: str, wall_s: float) -> dict:
         "last_event_utc": None,
         "silent_s": None,
         "how_to_read": (
-            "compare last_event_utc with the Ollama server log: no "
-            "/v1/chat/completions request after it means the model was idle "
-            "and the run was stuck in a sandbox tool call (see "
-            "opencode_state/opencode.db, part table, status != completed); "
-            "requests right up to killed_utc mean the model was still "
-            "generating (a thinking step that never produced a tool call)."
+            "compare last_event_utc with the Ollama server log, remembering "
+            "it lists only COMPLETED requests. Completed /v1/chat/completions "
+            "right up to killed_utc: the model was generating (a thinking "
+            "step that never produced a tool call). Last completed request "
+            "minutes before killed_utc and 'Request terminated: context "
+            "canceled' at the kill: a request hung inside Ollama -- check "
+            "the runner's last 'peak memory' line (the 2026-09-23 MLX hangs "
+            "all followed ~30 GiB) and `ollama ps` (model 'Stopping...'). "
+            "A child process in opencode_procs.txt with an incomplete tool "
+            "part in opencode_state/opencode.db would instead be a hung "
+            "sandbox tool."
         ),
     }
     if last_ms is not None:
@@ -354,9 +365,9 @@ class OpenCodeDriver:
         if proc.timed_out and container:
             # The container outlives the killed docker client. Before killing
             # it, copy out what the harness never prints: OpenCode's session
-            # store (the pending tool call included) and the process list --
-            # a stall inside the sandbox is otherwise indistinguishable from
-            # a slow model (three qwen seeds, 2026-09-22).
+            # store (a pending tool call included) and the process list --
+            # without them a hung sandbox tool, a hung Ollama request and a
+            # slow model all look the same (three qwen seeds, 2026-09-22).
             capture_container_state(container, data_root)
             subprocess.run(["docker", "kill", container],
                            capture_output=True, text=True)
