@@ -38,6 +38,7 @@ from pathlib import Path
 
 from hangar.evals.drivers.base import AgentResult, MCPServerSpec
 from hangar.evals.drivers.omd_context import omd_agent_context
+from hangar.evals.drivers.sandbox import capture_container_state
 from hangar.evals.drivers.proc import run_process
 from hangar.evals.drivers.sandbox import CONTAINER_WORKSPACE, ContainerSandbox
 from hangar.evals.trace import ToolCall, parse_omd_error_code
@@ -153,6 +154,51 @@ BUILTIN_TOOLS = [
 # mounted workspace — and ONLY the vectors a filesystem sandbox cannot stop
 # stay disabled (the OpenCode spellings of the anchor's _CONTAMINATION_TOOLS).
 CONTAMINATION_BUILTINS = ["webfetch", "websearch"]
+
+
+def timeout_note(stdout: str, wall_s: float) -> dict:
+    """What a timed-out seed looked like from the harness side.
+
+    ``silent_s`` is the gap between the last event OpenCode managed to print
+    and the kill. It cannot by itself separate a stalled sandbox tool from a
+    model thinking for the whole cap (a 32k-token reasoning step prints
+    nothing either), so the note says what to compare it with: the Ollama
+    request log. No ``/v1/chat/completions`` after ``last_event_utc`` means
+    the model was idle and the run was stuck in a tool call -- look in
+    ``opencode_state/opencode.db`` for the part that never completed.
+    """
+    last_ms = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ts = json.loads(line).get("timestamp")
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if isinstance(ts, (int, float)):
+            last_ms = ts
+    killed = time.time()
+    note = {
+        "timed_out": True,
+        "wall_clock_s": round(wall_s, 1),
+        "killed_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(killed)),
+        "last_event_utc": None,
+        "silent_s": None,
+        "how_to_read": (
+            "compare last_event_utc with the Ollama server log: no "
+            "/v1/chat/completions request after it means the model was idle "
+            "and the run was stuck in a sandbox tool call (see "
+            "opencode_state/opencode.db, part table, status != completed); "
+            "requests right up to killed_utc mean the model was still "
+            "generating (a thinking step that never produced a tool call)."
+        ),
+    }
+    if last_ms is not None:
+        note["last_event_utc"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_ms / 1000))
+        note["silent_s"] = round(killed - last_ms / 1000, 1)
+    return note
 
 
 def unload_model(base_url: str, model: str, timeout_s: float = 60.0) -> bool:
@@ -306,13 +352,23 @@ class OpenCodeDriver:
         proc = run_process(argv, timeout_s=timeout_s, cwd=str(data_root))
         wall = time.monotonic() - start
         if proc.timed_out and container:
-            # Killing the docker client does not stop the container.
+            # The container outlives the killed docker client. Before killing
+            # it, copy out what the harness never prints: OpenCode's session
+            # store (the pending tool call included) and the process list --
+            # a stall inside the sandbox is otherwise indistinguishable from
+            # a slow model (three qwen seeds, 2026-09-22).
+            capture_container_state(container, data_root)
             subprocess.run(["docker", "kill", container],
                            capture_output=True, text=True)
 
         # Persist the raw event stream so every run is debuggable after the
-        # fact (OpenCode itself does not retain `run`-mode transcripts).
+        # fact (OpenCode itself does not retain `run`-mode transcripts), and
+        # the stderr, which the record does not carry.
         (data_root / "opencode_events.jsonl").write_text(proc.stdout)
+        (data_root / "opencode_stderr.txt").write_text(proc.stderr or "")
+        if proc.timed_out:
+            (data_root / "opencode_timeout.json").write_text(
+                json.dumps(timeout_note(proc.stdout, wall), indent=2))
         if self.unload_after_run:
             unload_model(self.base_url, model)
 
