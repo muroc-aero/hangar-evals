@@ -20,6 +20,7 @@ from hangar.evals.campaign import (
     load_manifest,
     manifest_path,
     plan_rows,
+    print_plan,
 )
 from hangar.evals.run import RunConfig
 
@@ -118,6 +119,49 @@ def test_plan_reports_a_status_per_cell_without_running_anything(tmp_path):
     [row] = plan_rows(cells, tmp_path)
     assert row["status"].state == "not_started"
     assert row["estimate_s"] is None       # no prior data to estimate from
+
+
+def test_the_plan_shows_force_as_a_re_run_not_a_skip(tmp_path, capsys):
+    """Seen 2026-09-21: `run gemma --force --dry-run` printed all 11 graded
+    cells as `skip` and "2 to run" while the run loop re-ran all 13."""
+    from hangar.evals.results_index import CaseStatus
+    _, cells = load_manifest(_manifest(tmp_path, [_case("paraboloid")]), tmp_path)
+    rows = plan_rows(cells, tmp_path)
+    rows[0]["status"] = CaseStatus(state="graded", records=tmp_path / "x.jsonl",
+                                   n_seeds_found=5, n_seeds_wanted=5,
+                                   n_error_seeds=0, n_passed=5, reason="5/5 passed")
+    print_plan("gemma", rows)
+    assert "1 case(s), 0 to run, 1 already graded" in capsys.readouterr().out
+    print_plan("gemma", rows, force=True)
+    out = capsys.readouterr().out
+    assert "1 to run" in out and "FORCE " in out and "skip" not in out
+
+
+def test_force_starts_a_partial_cell_fresh_instead_of_resuming_it(tmp_path, monkeypatch):
+    """qwen paraboloid, 2026-09-22: a 3/5-seed record from June would have
+    been RESUMED under --force, stitching new seeds onto three-month-old ones."""
+    from hangar.evals import campaign as campaign_mod
+    from hangar.evals.results_index import CaseStatus
+    _, cells = load_manifest(_manifest(tmp_path, [_case("paraboloid")]), tmp_path)
+    [(_, config)] = cells
+    partial = tmp_path / "paraboloid_20260625T000000Z.jsonl"
+    partial.write_text("")
+    partial.with_name(partial.stem + "_config.json").write_text('{"stamp": "20260625T000000Z"}')
+    seen = {}
+    monkeypatch.setattr(campaign_mod, "case_status", lambda c, r: CaseStatus(
+        state="resumable", records=partial, n_seeds_found=3, n_seeds_wanted=5,
+        n_error_seeds=0, n_passed=0, reason="2 seed(s) never ran"))
+    monkeypatch.setattr(campaign_mod, "load_resume_records",
+                        lambda *a, **k: seen.setdefault("resumed", True))
+    monkeypatch.setattr(campaign_mod, "run_matrix",
+                        lambda cfg, stamp, resume_records=None: seen.update(
+                            stamp=stamp, resume=resume_records))
+    monkeypatch.setattr(campaign_mod, "regrade_file", lambda p: [])
+    campaign_mod._run_one_case(config, tmp_path)
+    assert seen["stamp"] == "20260625T000000Z" and seen["resume"] is True
+    seen.clear()
+    campaign_mod._run_one_case(config, tmp_path, force=True)
+    assert seen["stamp"] != "20260625T000000Z" and seen["resume"] is None
 
 
 def test_the_estimate_uses_the_newest_prior_run_of_the_case(tmp_path):

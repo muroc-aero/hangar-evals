@@ -73,7 +73,7 @@ a five-hour bundle needs one unlock and no further prompts. The local arms need
 no credential and no `op`:
 
 ```bash
-scripts/evals run gemma            # on-device, ~14 h, free
+scripts/evals run gemma            # on-device, ~8.5 h, free
 scripts/evals run paper            # lanes + agent column + every arm
 scripts/evals run anchor --dry-run # preflight and plan; no agent calls, no spend
 scripts/evals run anchor --only paraboloid,pyc_turbojet
@@ -106,6 +106,91 @@ What the runner guarantees:
 
 Each run leaves `table.md`, `manifest.json` (what ran, at which SHA, with what
 outcome), and `campaign.log` under `results/campaigns/<arm>_<stamp>/`.
+
+## What each harness shows the model
+
+The anchor (Claude Code) receives omd's MCP `instructions` in its system
+prompt and can list and read the server's resources; its first calls on
+every case read `omd://reference` and `omd://plan-schema`. OpenCode 1.17.5
+forwards neither (verified in the binary, 2026-09-21): the model sees omd's
+tools and nothing else. So the OpenCode driver writes, before every run,
+an `AGENTS.md` carrying the same instructions (OpenCode loads it into the
+system prompt) and the two resources as `omd_reference.md` and
+`omd_plan_schema.json` for its `read` tool -- inlined into `AGENTS.md` on the
+unsandboxed track, which has no `read`. The texts are imported from
+`hangar.omd` at run time (`drivers/omd_context.py`), never copied. Arms
+before 2026-09-21 ran without this; the gemma arm of that date is the last
+one that did.
+
+## Ollama on the local arms
+
+Ollama 0.30's MLX runner grows by about 0.5 GiB per request and never
+shrinks: on 2026-09-22 `qwen3.6:35b-mlx` went from 21 GiB at load to 47 GiB
+34 minutes later with no prompt above 33k tokens, the host swapped 20 GB,
+and every seed after that ended in one turn with no tool call (the model's
+opening sentence, then `stop`). Those look like graded FAILs but are an
+infrastructure fault. The OpenCode driver therefore unloads the model after
+every seed (`unload_model`, `keep_alive: 0`, a few seconds to reload), and
+`unload_after_run=False` turns that off. If a local arm's seeds start
+finishing in one turn, check `sysctl vm.swapusage` and Ollama's
+`peak memory` log lines (`/opt/homebrew/var/log/ollama.log`) before
+reading anything into the numbers. The same leak has a second face: a seed
+long enough to push the runner past ~30 GiB (about 25 requests) hangs on
+its next request until the cap (next section). Until Ollama is upgraded
+past 0.30.10 or the Metal wired limit is raised (`sudo sysctl
+iogpu.wired_limit_mb=...`), expect a few percent of long seeds to be lost
+that way; `mark-lost` and the resume recover them.
+
+## When a local seed hits the cap with the model idle
+
+A timed-out seed is graded like any other (a run that happened before the
+cap still counts), so a seed that hit the cap because something hung looks
+exactly like one that hit it thinking. On the 2026-09-22 qwen arm three
+seeds hung, and a fourth did while being re-run the next morning, with the
+container's state copied out live: only `opencode run` itself was running
+(no child tool process), OpenCode had opened a new step and an empty
+reasoning part one second after the last completed model request, Ollama
+had accepted that request (a `cache hit` line, prompt processed) and never
+answered it, `ollama ps` showed the model `Stopping...`, the runner spun at
+~70% CPU, and Ollama logged `Request terminated: context canceled` the
+moment the client was killed. Every one of the four followed a `peak
+memory` line of 30.0-32.1 GiB against the 36.9 GiB Metal ceiling Ollama
+reports on this 48 GB machine: the MLX runner (0.30.10) leaks about
+0.5 GiB per request, the per-seed unload contains that across seeds, and a
+long seed still climbs into the ceiling and hangs on its next request.
+Ollama's access log lists only completed requests, so a hung one looks like
+an idle model -- read the runner lines, not the `[GIN]` lines.
+
+The OpenCode driver now leaves three things next to the events file:
+
+- `opencode_stderr.txt` -- always.
+- `opencode_timeout.json` -- on a timeout: the last printed event's time,
+  the kill time, and the gap (`silent_s`). A long gap alone does not settle
+  it (a 32k-token reasoning step prints nothing either); compare with
+  `/opt/homebrew/var/log/ollama.log`. Completed requests up to the kill =
+  the model was generating. Last completed request minutes before the kill
+  and `Request terminated: context canceled` at the kill = a request hung
+  inside Ollama; check the last `peak memory` line.
+- `opencode_state/` and `opencode_procs.txt` -- on a sandboxed timeout,
+  `docker cp` of the container's `~/.local/share/opencode` (the SQLite
+  session store: every message part, a pending tool call included) and
+  its process list, taken BEFORE `docker kill`. A child process here with
+  an incomplete tool part in the store would be a hung sandbox tool; the
+  four stalls so far had neither.
+
+A seed the log shows to be a stall is a harness loss, not a result. Mark it
+so and the honest resume retries exactly it, nothing else:
+
+```bash
+scripts/evals mark-lost pyc_turbojet --seeds 4 \
+    --reason "Ollama MLX runner hung at 30 GiB peak memory, 16 min before the cap"
+scripts/evals run qwen --only pyc_turbojet       # resumes seed 4 only
+```
+
+`mark-lost` appends a superseding error row (type `HarnessLoss`, with the
+reason and what it replaced) to the newest records file for the case; the
+original row stays in the file. Never mark a seed lost for a verdict you
+disagree with -- that is what `evals review` is for.
 
 ## When a seed exits nonzero
 

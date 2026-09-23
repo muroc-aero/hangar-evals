@@ -236,14 +236,17 @@ def _estimate_seconds(config: RunConfig, results_dir: Path) -> float | None:
     return None
 
 
-def print_plan(name: str, rows: list[dict]) -> None:
-    todo = [r for r in rows if r["status"].should_run]
+def print_plan(name: str, rows: list[dict], *, force: bool = False) -> None:
+    """``force`` mirrors ``run_campaign``: graded cells run again, fresh."""
+    todo = [r for r in rows if force or r["status"].should_run]
     print(f"\n== plan for '{name}': {len(rows)} case(s), "
-          f"{len(todo)} to run, {len(rows) - len(todo)} already graded")
+          f"{len(todo)} to run, {len(rows) - len(todo)} already graded"
+          + (" (--force: graded cells re-run)" if force else ""))
     for row in rows:
         status = row["status"]
-        mark = {"graded": "skip  ", "resumable": "RESUME",
-                "not_started": "run   "}[status.state]
+        mark = {"graded": "skip  ", "resumable": "RESUME", "not_started": "run   "}[status.state]
+        if force and status.state != "not_started":
+            mark = "FORCE "  # graded AND partial cells start fresh under --force
         est = f"~{_hms(row['estimate_s'])}" if row["estimate_s"] else "~?"
         print(f"   {mark} {row['config'].case:<22s} {row['config'].seeds} seeds  "
               f"{est:>8s}   {status.reason}")
@@ -270,11 +273,17 @@ def _run_hangar_step(step: str, hangar_repo: Path) -> bool:
     return proc.returncode == 0
 
 
-def _run_one_case(config: RunConfig, results_dir: Path) -> tuple[str, list[dict]]:
-    """Run (or resume) one cell. Returns ``(state, regraded summaries)``."""
+def _run_one_case(config: RunConfig, results_dir: Path, *,
+                  force: bool = False) -> tuple[str, list[dict]]:
+    """Run (or resume) one cell. Returns ``(state, regraded summaries)``.
+
+    ``force`` starts fresh even when a partial record exists: a forced arm is
+    a new measurement, and resuming would stitch this run's seeds onto ones
+    from months ago (the qwen paraboloid cell, 3 seeds from 2026-06).
+    """
     status = case_status(config, results_dir)
     resume_records = None
-    if status.is_resume:
+    if status.is_resume and not force:
         manifest = status.records.with_name(status.records.stem + "_config.json")
         if manifest.is_file():
             stamp = json.loads(manifest.read_text())["stamp"]
@@ -364,7 +373,7 @@ def run_campaign(name: str, *, only: set[str] | None = None, force: bool = False
                 continue
             _run_hangar_step(step, hangar_repo)
 
-        print_plan(name, plan_rows(cells, results_dir))
+        print_plan(name, plan_rows(cells, results_dir), force=force)
         print()
 
         total = len(cells)
@@ -401,7 +410,7 @@ def run_campaign(name: str, *, only: set[str] | None = None, force: bool = False
                      "started": datetime.now(timezone.utc).isoformat(
                          timespec="seconds")}
             try:
-                state, cell_summaries = _run_one_case(config, results_dir)
+                state, cell_summaries = _run_one_case(config, results_dir, force=force)
             except KeyboardInterrupt:
                 entry.update(status="interrupted", elapsed_s=time.time() - t0)
                 entries.append(entry)
@@ -601,6 +610,19 @@ def main(argv: list[str] | None = None) -> int:
         p = sub.add_parser(name, help=f"{help_text}; run nothing")
         p.add_argument("--results-dir", type=Path, default=None)
 
+    p_lost = sub.add_parser(
+        "mark-lost",
+        help="turn graded seeds into harness-loss rows so the next run retries "
+             "exactly them (a stalled sandbox, not a model result)")
+    p_lost.add_argument("case")
+    p_lost.add_argument("--seeds", required=True,
+                        help="comma-separated seed numbers")
+    p_lost.add_argument("--reason", required=True,
+                        help="why these seeds are harness losses (recorded in the row)")
+    p_lost.add_argument("--harness", default=None)
+    p_lost.add_argument("--model", default=None)
+    p_lost.add_argument("--results-dir", type=Path, default=None)
+
     args = parser.parse_args(argv)
     results_dir = Path(args.results_dir or REPO_ROOT / "results")
 
@@ -611,6 +633,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.cmd == "review":
         print_review(review_rows(results_dir))
+        return 0
+
+    if args.cmd == "mark-lost":
+        from hangar.evals.mark_lost import mark_lost
+
+        seeds = [int(s) for s in args.seeds.split(",") if s.strip()]
+        out = mark_lost(args.case, seeds, args.reason, results_dir,
+                        harness=args.harness, model=args.model)
+        for harness, model, seed in out["marked"]:
+            print(f"   marked lost  {args.case} · {harness}/{model} · seed {seed}")
+        print(f"   file         {out['file']}")
+        print("   next: the plain `scripts/evals run <arm>` resumes these seeds; "
+              "`scripts/evals table` re-renders without running.")
         return 0
 
     if args.cmd == "status":
@@ -635,7 +670,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"   preflight  {result}")
         for step in composite.get("hangar_steps", []):
             print(f"   would run  [hangar] {step}: {HANGAR_STEPS[step][1]}")
-        print_plan(args.campaign, plan_rows(cells, results_dir))
+        print_plan(args.campaign, plan_rows(cells, results_dir), force=args.force)
         print("\n   dry run — nothing was executed.")
         return 0
 

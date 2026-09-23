@@ -30,12 +30,15 @@ Two operational notes learned from the spike:
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from hangar.evals.drivers.base import AgentResult, MCPServerSpec
+from hangar.evals.drivers.omd_context import omd_agent_context
+from hangar.evals.drivers.sandbox import capture_container_state
 from hangar.evals.drivers.proc import run_process
 from hangar.evals.drivers.sandbox import CONTAINER_WORKSPACE, ContainerSandbox
 from hangar.evals.trace import ToolCall, parse_omd_error_code
@@ -79,6 +82,12 @@ def _accumulate_tokens(acc: dict, tokens) -> None:
             acc[key] = acc.get(key, 0) + val
 
 
+# FastMCP's rendering of an unhandled exception inside a tool: plain text, no
+# envelope, and OpenCode marks the call "completed" anyway.
+TOOL_EXCEPTION_PREFIX = "Error executing tool "
+TOOL_EXCEPTION_CODE = "TOOL_EXCEPTION"
+
+
 def parse_opencode_events(stdout: str, server: str) -> OpenCodeRun:
     """Parse OpenCode's ``--format json`` JSONL into report + trace + telemetry.
 
@@ -86,7 +95,9 @@ def parse_opencode_events(stdout: str, server: str) -> OpenCodeRun:
     ``state.status == "completed"`` AND its output is not an omd error
     envelope — omd returns ``USER_INPUT_ERROR`` envelopes as normal tool
     OUTPUT (status still "completed"), so the envelope, not the status, is the
-    source of truth for schema rejections.
+    source of truth for schema rejections. A tool that raised (FastMCP renders
+    it as ``Error executing tool <name>: ...``, no envelope) is a failed call
+    too, coded ``TOOL_EXCEPTION``.
     """
     text_parts: list[str] = []
     calls: list[ToolCall] = []
@@ -112,6 +123,11 @@ def parse_opencode_events(stdout: str, server: str) -> OpenCodeRun:
             if output is not None and not isinstance(output, str):
                 output = json.dumps(output)
             code = parse_omd_error_code(output)
+            if code is None and isinstance(output, str) and output.startswith(TOOL_EXCEPTION_PREFIX):
+                # The MCP layer's text for a tool that RAISED instead of returning
+                # an envelope (e.g. run_plan on a directory: "[Errno 21] Is a
+                # directory"). OpenCode still reports status "completed".
+                code = TOOL_EXCEPTION_CODE
             ok = state.get("status") == "completed" and code is None
             calls.append(ToolCall(tool=tool, ok=ok, error_code=code or (None if ok else "ERROR")))
         elif etype == "step_finish":
@@ -138,6 +154,94 @@ BUILTIN_TOOLS = [
 # mounted workspace — and ONLY the vectors a filesystem sandbox cannot stop
 # stay disabled (the OpenCode spellings of the anchor's _CONTAMINATION_TOOLS).
 CONTAMINATION_BUILTINS = ["webfetch", "websearch"]
+
+
+def timeout_note(stdout: str, wall_s: float) -> dict:
+    """What a timed-out seed looked like from the harness side.
+
+    ``silent_s`` is the gap between the last event OpenCode managed to print
+    and the kill. It cannot by itself separate a hung model request from a
+    model thinking for the whole cap (a 32k-token reasoning step prints
+    nothing either), so the note says what to compare it with. Ollama's
+    access log lists only COMPLETED requests: a run whose last logged
+    ``/v1/chat/completions`` predates ``last_event_utc`` by minutes is not an
+    idle model but a request still in flight -- on 2026-09-23 four such
+    stalls were the MLX runner hanging on the first request after its peak
+    memory passed ~30 GiB (``ollama ps`` shows the model ``Stopping...`` and
+    the runner spins at ~70% CPU until the client disconnects). A pending
+    sandbox tool call would instead show a child process in
+    ``opencode_procs.txt`` and an incomplete tool part in
+    ``opencode_state/opencode.db``.
+    """
+    last_ms = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ts = json.loads(line).get("timestamp")
+        except (json.JSONDecodeError, AttributeError):
+            continue
+        if isinstance(ts, (int, float)):
+            last_ms = ts
+    killed = time.time()
+    note = {
+        "timed_out": True,
+        "wall_clock_s": round(wall_s, 1),
+        "killed_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(killed)),
+        "last_event_utc": None,
+        "silent_s": None,
+        "how_to_read": (
+            "compare last_event_utc with the Ollama server log, remembering "
+            "it lists only COMPLETED requests. Completed /v1/chat/completions "
+            "right up to killed_utc: the model was generating (a thinking "
+            "step that never produced a tool call). Last completed request "
+            "minutes before killed_utc and 'Request terminated: context "
+            "canceled' at the kill: a request hung inside Ollama -- check "
+            "the runner's last 'peak memory' line (the 2026-09-23 MLX hangs "
+            "all followed ~30 GiB) and `ollama ps` (model 'Stopping...'). "
+            "A child process in opencode_procs.txt with an incomplete tool "
+            "part in opencode_state/opencode.db would instead be a hung "
+            "sandbox tool."
+        ),
+    }
+    if last_ms is not None:
+        note["last_event_utc"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(last_ms / 1000))
+        note["silent_s"] = round(killed - last_ms / 1000, 1)
+    return note
+
+
+def unload_model(base_url: str, model: str, timeout_s: float = 60.0) -> bool:
+    """Ask Ollama to drop ``model``'s runner now (``keep_alive: 0``).
+
+    Ollama 0.30's MLX runner grows by ~0.5 GiB per request and never shrinks
+    (qwen3.6:35b-mlx: 21 GiB at load, 47 GiB 34 min later with prompts under
+    33k tokens; the host swapped 20 GB and seeds degraded to one-turn
+    stops -- 2026-09-22). Unloading stops the runner subprocess, which is
+    the only thing that frees it. A reload costs a few seconds per seed.
+    ``base_url`` is the OpenAI-compatible endpoint (``.../v1``); the native
+    API sits beside it. Returns False (and logs) rather than raising: a
+    failed unload must not lose a finished seed.
+    """
+    import urllib.error
+    import urllib.request
+
+    native = base_url.rstrip("/")
+    if native.endswith("/v1"):
+        native = native[: -len("/v1")]
+    req = urllib.request.Request(
+        native + "/api/generate",
+        data=json.dumps({"model": model, "keep_alive": 0}).encode(),
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            resp.read()
+        return True
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        logging.getLogger(__name__).warning("unload of %s failed: %s", model, exc)
+        return False
 
 
 def _containerize_url(url: str) -> str:
@@ -218,11 +322,13 @@ class OpenCodeDriver:
         provider: str = "ollama",
         binary: str = "opencode",
         sandbox: ContainerSandbox | None = None,
+        unload_after_run: bool = True,
     ):
         self.base_url = base_url
         self.provider = provider
         self.binary = binary
         self.sandbox = sandbox
+        self.unload_after_run = unload_after_run  # see unload_model
 
     def run(
         self,
@@ -240,6 +346,12 @@ class OpenCodeDriver:
             mcp, model, self.provider, self.base_url,
             sandboxed=self.sandbox is not None)
         (data_root / "opencode.json").write_text(json.dumps(config, indent=2))
+        # omd's instructions + resources, which OpenCode would otherwise never
+        # show the model (see omd_context). Written before launch; the agent
+        # then starts from the same texts the anchor reads over MCP.
+        for name, text in omd_agent_context(
+                files_readable=self.sandbox is not None).items():
+            (data_root / name).write_text(text)
 
         container = f"hangar_{data_root.name}" if self.sandbox else None
         argv = self.build_argv(prompt, data_root, model, container=container)
@@ -251,13 +363,25 @@ class OpenCodeDriver:
         proc = run_process(argv, timeout_s=timeout_s, cwd=str(data_root))
         wall = time.monotonic() - start
         if proc.timed_out and container:
-            # Killing the docker client does not stop the container.
+            # The container outlives the killed docker client. Before killing
+            # it, copy out what the harness never prints: OpenCode's session
+            # store (a pending tool call included) and the process list --
+            # without them a hung sandbox tool, a hung Ollama request and a
+            # slow model all look the same (three qwen seeds, 2026-09-22).
+            capture_container_state(container, data_root)
             subprocess.run(["docker", "kill", container],
                            capture_output=True, text=True)
 
         # Persist the raw event stream so every run is debuggable after the
-        # fact (OpenCode itself does not retain `run`-mode transcripts).
+        # fact (OpenCode itself does not retain `run`-mode transcripts), and
+        # the stderr, which the record does not carry.
         (data_root / "opencode_events.jsonl").write_text(proc.stdout)
+        (data_root / "opencode_stderr.txt").write_text(proc.stderr or "")
+        if proc.timed_out:
+            (data_root / "opencode_timeout.json").write_text(
+                json.dumps(timeout_note(proc.stdout, wall), indent=2))
+        if self.unload_after_run:
+            unload_model(self.base_url, model)
 
         if not proc.timed_out and proc.returncode != 0:
             raise RuntimeError(
