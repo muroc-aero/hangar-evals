@@ -134,17 +134,32 @@ every seed (`unload_model`, `keep_alive: 0`, a few seconds to reload), and
 `unload_after_run=False` turns that off. If a local arm's seeds start
 finishing in one turn, check `sysctl vm.swapusage` and Ollama's
 `peak memory` log lines (`/opt/homebrew/var/log/ollama.log`) before
-reading anything into the numbers.
+reading anything into the numbers. The same leak has a second face: a seed
+long enough to push the runner past ~30 GiB (about 25 requests) hangs on
+its next request until the cap (next section). Until Ollama is upgraded
+past 0.30.10 or the Metal wired limit is raised (`sudo sysctl
+iogpu.wired_limit_mb=...`), expect a few percent of long seeds to be lost
+that way; `mark-lost` and the resume recover them.
 
 ## When a local seed hits the cap with the model idle
 
 A timed-out seed is graded like any other (a run that happened before the
-cap still counts), so a seed that hit the cap because a sandbox tool hung
-looks exactly like one that hit it thinking. On the 2026-09-22 qwen arm
-three seeds did the former: Ollama's log showed no `/v1/chat/completions`
-for 11, 16 and 43 minutes before the kill, omd had no pending request, and
-the last three model replies were missing from `opencode_events.jsonl`
-because OpenCode's stdout was still buffered when the process group died.
+cap still counts), so a seed that hit the cap because something hung looks
+exactly like one that hit it thinking. On the 2026-09-22 qwen arm three
+seeds hung, and a fourth did while being re-run the next morning, with the
+container's state copied out live: only `opencode run` itself was running
+(no child tool process), OpenCode had opened a new step and an empty
+reasoning part one second after the last completed model request, Ollama
+had accepted that request (a `cache hit` line, prompt processed) and never
+answered it, `ollama ps` showed the model `Stopping...`, the runner spun at
+~70% CPU, and Ollama logged `Request terminated: context canceled` the
+moment the client was killed. Every one of the four followed a `peak
+memory` line of 30.0-32.1 GiB against the 36.9 GiB Metal ceiling Ollama
+reports on this 48 GB machine: the MLX runner (0.30.10) leaks about
+0.5 GiB per request, the per-seed unload contains that across seeds, and a
+long seed still climbs into the ceiling and hangs on its next request.
+Ollama's access log lists only completed requests, so a hung one looks like
+an idle model -- read the runner lines, not the `[GIN]` lines.
 
 The OpenCode driver now leaves three things next to the events file:
 
@@ -152,20 +167,23 @@ The OpenCode driver now leaves three things next to the events file:
 - `opencode_timeout.json` -- on a timeout: the last printed event's time,
   the kill time, and the gap (`silent_s`). A long gap alone does not settle
   it (a 32k-token reasoning step prints nothing either); compare with
-  `/opt/homebrew/var/log/ollama.log`. Requests up to the kill = the model
-  was generating. No request after `last_event_utc` = the model was idle
-  and the run was stuck in a sandbox tool call.
+  `/opt/homebrew/var/log/ollama.log`. Completed requests up to the kill =
+  the model was generating. Last completed request minutes before the kill
+  and `Request terminated: context canceled` at the kill = a request hung
+  inside Ollama; check the last `peak memory` line.
 - `opencode_state/` and `opencode_procs.txt` -- on a sandboxed timeout,
   `docker cp` of the container's `~/.local/share/opencode` (the SQLite
-  session store: every message part, the pending tool call included) and
-  its process list, taken BEFORE `docker kill`.
+  session store: every message part, a pending tool call included) and
+  its process list, taken BEFORE `docker kill`. A child process here with
+  an incomplete tool part in the store would be a hung sandbox tool; the
+  four stalls so far had neither.
 
 A seed the log shows to be a stall is a harness loss, not a result. Mark it
 so and the honest resume retries exactly it, nothing else:
 
 ```bash
 scripts/evals mark-lost pyc_turbojet --seeds 4 \
-    --reason "sandbox stalled: Ollama idle 16 min before the cap"
+    --reason "Ollama MLX runner hung at 30 GiB peak memory, 16 min before the cap"
 scripts/evals run qwen --only pyc_turbojet       # resumes seed 4 only
 ```
 
